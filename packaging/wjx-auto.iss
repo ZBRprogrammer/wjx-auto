@@ -97,6 +97,7 @@ Type: filesandordirs; Name: "{app}\.selenium-cache"
 [Code]
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  CandidateCount = 7;
 
 // ---------------------------------------------------------------------------
 // 目录可写性检查
@@ -162,25 +163,127 @@ begin
     RemoveDir(Missing[I]);
 end;
 
-function InstallDirHint(): String;
+// ---------------------------------------------------------------------------
+// 自诊断模式：  setup.exe /TESTDIRS
+// 在向导打开前就把"本机哪些目录能建、哪些被拒"写成一份文本报告，
+// 方便定位"安装程序无法创建目录 / 拒绝访问"这类问题。不安装任何东西。
+// ---------------------------------------------------------------------------
+function TestOneDir(const Title, Dir: String): String;
 begin
-  Result := ExpandConstant('{localappdata}\Programs\{#MyAppDirName}');
+  Result := Title + ' = ' + Dir + #13#10;
+  if DirExists(Dir) then
+    Result := Result + '    已存在；'
+  else
+    Result := Result + '    不存在；';
+  if DirLooksWritable(Dir) then
+    Result := Result + '可写 ✔' + #13#10
+  else
+    Result := Result + '不可写 ✘' + #13#10;
+end;
+
+function BoolText(Value: Boolean): String;
+begin
+  if Value then
+    Result := '是'
+  else
+    Result := '否';
 end;
 
 // 候选安装目录（按可写性依次尝试）。
-// 有些环境的 %LOCALAPPDATA%\Programs（或 LocalAppData 本身被重定向）会被策略
-// 或残留权限挡住，所以不只依赖一个默认值，而是逐个试。
+// 实测（含受限沙箱）：安装程序解包出的子进程权限比预期更窄，
+// %LOCALAPPDATA% / 文档 / 桌面 都可能被拒，而 %TEMP% 一定可写，
+// 所以候选表里必须有它兜底。
 function CandidateDir(Index: Integer): String;
+var
+  UserProfile: String;
 begin
   case Index of
     0: Result := ExpandConstant('{localappdata}\{#MyAppDirName}');
     1: Result := ExpandConstant('{localappdata}\Programs\{#MyAppDirName}');
     2: Result := ExpandConstant('{userappdata}\{#MyAppDirName}');
     3: Result := ExpandConstant('{userdocs}\{#MyAppDirName}');
-    4: Result := ExpandConstant('{tmp}\{#MyAppDirName}');
+    4: Result := ExpandConstant('{userdesktop}\{#MyAppDirName}');
+    5: Result := ExpandConstant('{tmp}\{#MyAppDirName}');
+    6:
+      begin
+        // 直接拼 USERPROFILE（不依赖 Inno 常量，兼容被重定向的环境）
+        UserProfile := GetEnv('USERPROFILE');
+        if UserProfile <> '' then
+          Result := AddBackslash(UserProfile) + '{#MyAppDirName}'
+        else
+          Result := '';
+      end;
   else
     Result := '';
   end;
+end;
+
+// ---------------------------------------------------------------------------
+// 自诊断模式：  setup.exe /TESTDIRS
+// 在向导打开前就把"本机哪些目录能建、哪些被拒"写成一份文本报告，
+// 方便定位"安装程序无法创建目录 / 拒绝访问"这类问题。不安装任何东西。
+// ---------------------------------------------------------------------------
+procedure RunDirDiagnostics();
+var
+  Report: String;
+  I: Integer;
+  OutFile: String;
+begin
+  Report := 'wjx-auto 安装目录自诊断' + #13#10 +
+            '时间: ' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + #13#10 +
+            '安装包版本: {#MyAppVersion}' + #13#10 +
+            'Windows: ' + GetWindowsVersionString + #13#10 +
+            '是否管理员: ' + BoolText(IsAdminLoggedOn) + #13#10 +
+            'USERPROFILE    = ' + GetEnv('USERPROFILE') + #13#10 +
+            'LOCALAPPDATA   = ' + ExpandConstant('{localappdata}') + #13#10 +
+            'APPDATA        = ' + ExpandConstant('{userappdata}') + #13#10 +
+            'TEMP           = ' + ExpandConstant('{tmp}') + #13#10 +
+            '用户桌面       = ' + ExpandConstant('{userdesktop}') + #13#10 +
+            '用户文档       = ' + ExpandConstant('{userdocs}') + #13#10 + #13#10 +
+            '—— 候选安装目录 ——' + #13#10;
+  for I := 0 to CandidateCount - 1 do
+    Report := Report + TestOneDir('候选' + IntToStr(I), CandidateDir(I));
+
+  Report := Report + #13#10 + '—— 其它关键位置 ——' + #13#10 +
+            TestOneDir('桌面', ExpandConstant('{userdesktop}')) +
+            TestOneDir('用户文档', ExpandConstant('{userdocs}')) +
+            TestOneDir('临时目录', ExpandConstant('{tmp}'));
+
+  // 报告按"最可能成功且用户能找到"的顺序落盘
+  OutFile := ExpandConstant('{userdesktop}\wjx-auto-安装目录自诊断.txt');
+  if not SaveStringToFile(OutFile, Report, False) then
+  begin
+    OutFile := ExpandConstant('{userdocs}\wjx-auto-安装目录自诊断.txt');
+    if not SaveStringToFile(OutFile, Report, False) then
+    begin
+      OutFile := ExpandConstant('{tmp}\wjx-auto-安装目录自诊断.txt');
+      SaveStringToFile(OutFile, Report, False);
+    end;
+  end;
+  Log('--- /TESTDIRS 自诊断报告开始 ---');
+  Log(Report);
+  Log('--- 报告结束 ---');
+
+  MsgBox('自诊断完成，报告已保存到：' + #13#10 + OutFile + #13#10 + #13#10 +
+         '请把该文件内容发回，即可定位是哪个目录被拒绝访问。',
+         mbInformation, MB_OK);
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  // 注意：/TESTDIRS 是开关型参数，不是 key=value，所以直接从原始命令行找
+  if Pos('TESTDIRS', UpperCase(GetCmdTail)) > 0 then
+  begin
+    RunDirDiagnostics();
+    Result := False;      // 只诊断，不安装
+  end;
+end;
+
+// 首选安装目录（提示文案用）
+function InstallDirHint(): String;
+begin
+  Result := CandidateDir(0);
 end;
 
 // 返回第一个可写候选目录；都不可写则返回空串。
@@ -194,14 +297,13 @@ begin
   if not IsUninstaller then
   begin
     Pref := WizardDirValue;
-    if (Pref <> '') and (CompareText(Pref, ExpandConstant('{localappdata}\Programs\{#MyAppDirName}')) <> 0)
-       and DirLooksWritable(Pref) then
+    if (Pref <> '') and DirExists(Pref) and DirLooksWritable(Pref) then
     begin
       Result := Pref;
       Exit;
     end;
   end;
-  for I := 0 to 4 do
+  for I := 0 to CandidateCount - 1 do
   begin
     Result := CandidateDir(I);
     if (Result <> '') and DirLooksWritable(Result) then

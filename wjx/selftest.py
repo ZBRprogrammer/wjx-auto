@@ -560,6 +560,7 @@ def test_backend_and_scheduler() -> None:
         cfg3.tasks = [a3, b3]
         s3 = Scheduler(cfg3, config_path=False)
         _tick_until(s3, [a3, b3])
+        _join(s3, b3, timeout=20)      # B 可能在 A 之后才启动，等一下再断言
         _check("A 失败后 B 继续填写成功",
                a3.last_run is not None and a3.last_run.result == "full"
                and b3.status == TaskStatus.SUCCESS.value,

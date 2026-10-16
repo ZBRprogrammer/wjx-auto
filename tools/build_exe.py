@@ -170,9 +170,10 @@ def build_installer(skip_build: bool = False) -> int:
     print("»", " ".join(str(c) for c in cmd), flush=True)
     code = subprocess.call([str(c) for c in cmd], cwd=str(ROOT / "packaging"))
     if code == 0:
-        setups = sorted(SETUP_OUT.glob("*.exe"))
-        for s in setups:
+        for s in sorted(SETUP_OUT.glob("*.exe")):
             print(f"安装包：{s}  ({s.stat().st_size / 1024 / 1024:.1f} MB)")
+        print("排查安装问题：在安装包目录执行  wjx-auto-<版本>-setup.exe /TESTDIRS  "
+              "会弹窗并导出一份目录可写性报告（写到桌面/文档/临时目录）")
     return code
 
 
