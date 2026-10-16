@@ -85,7 +85,14 @@ def driver_datas(project: Path) -> List[Tuple[str, str]]:
     """随包提供浏览器驱动（用户可自行替换成与自己浏览器版本匹配的）。
 
     只收驱动可执行文件，跳过 zip 包与说明文件（省 10+ MB）。
+    环境变量 ``WJX_PACK_NO_DRIVER=1`` 时不内置驱动（体积再小约 23MB，
+    用户需自己把驱动放进 exe 同级 drivers\\ 目录）。
     """
+    import os
+
+    if os.environ.get("WJX_PACK_NO_DRIVER") == "1":
+        print("[common] 按要求不内置浏览器驱动（--no-driver）")
+        return []
     drivers = project / "drivers"
     if not drivers.is_dir():
         return []

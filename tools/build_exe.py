@@ -105,9 +105,14 @@ def main() -> int:
     parser.add_argument("--only-onefile", action="store_true", help="只构建单文件 exe")
     parser.add_argument("--clean", action="store_true", help="先清空 build/ 与 dist/")
     parser.add_argument("--skip-selftest", action="store_true", help="打包前不跑自测")
+    parser.add_argument("--no-driver", action="store_true",
+                        help="不内置浏览器驱动（体积小 ~23MB；用户需自行放入 drivers/）")
     args = parser.parse_args()
 
     started = time.time()
+    if args.no_driver:
+        # 通过环境变量告诉 common.py 跳过驱动收集（放在 dist 里由用户自行提供）
+        os.environ["WJX_PACK_NO_DRIVER"] = "1"
     ensure_pyinstaller()
     if args.clean:
         clean()
