@@ -299,17 +299,56 @@ class AnswerBank:
         }
 
     # -- 维护 -------------------------------------------------------------- #
+    def _unique_id(self, base: str) -> str:
+        """生成不与现有规则冲突的 id（中文题目也要能得到可读 id）。"""
+        slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", base or "")[:12]
+        if not slug:
+            slug = "rule"
+        candidate = f"r{len(self.rules) + 1}-{slug}"
+        existing = {r.id for r in self.rules}
+        if candidate not in existing:
+            return candidate
+        n = 2
+        while f"{candidate}-{n}" in existing:
+            n += 1
+        return f"{candidate}-{n}"
+
     def add_rule(self, pattern: str, answer: Any, match: str = "text",
                  note: str = "", rule_id: str = "") -> AnswerRule:
-        if not rule_id:
-            rule_id = f"r{len(self.rules) + 1}-{re.sub(r'[^0-9a-zA-Z]+', '', pattern)[:12] or 'x'}"
-        rule = AnswerRule(id=rule_id, match=match, pattern=pattern, answer=answer, note=note)
+        """新增规则；pattern 相同且答案也相同的规则会被视为重复而跳过（幂等）。
+
+        同一题目重复点"新增"时，会**更新**已有规则的答案，而不是插入重复项。
+        """
+        match = (match or "text").lower()
+        for existing in self.rules:
+            if existing.pattern == pattern and existing.match == match:
+                existing.answer = answer
+                existing.note = note or existing.note
+                existing.enabled = True
+                if match == "regex":
+                    try:
+                        existing._regex = re.compile(pattern, re.I)
+                    except re.error:
+                        existing._regex = None
+                elif match == "text":
+                    existing._regex = re.compile(re.escape(pattern), re.I)
+                return existing
+
+        rule = AnswerRule(id=rule_id or self._unique_id(pattern), match=match,
+                          pattern=pattern, answer=answer, note=note)
         if match == "regex":
             rule._regex = re.compile(pattern, re.I)
         elif match == "text":
             rule._regex = re.compile(re.escape(pattern), re.I)
         self.rules.append(rule)
         return rule
+
+    def add_rule_safe(self, pattern: str, answer: Any, match: str = "text",
+                      note: str = "", rule_id: str = "") -> Tuple[AnswerRule, bool]:
+        """返回 (规则, 是否新建)。正则非法时抛 re.error 由调用方提示。"""
+        before = len(self.rules)
+        rule = self.add_rule(pattern, answer, match, note, rule_id)
+        return rule, len(self.rules) > before
 
     def remove_rule(self, key: str) -> bool:
         before = len(self.rules)
@@ -436,7 +475,10 @@ def default_rules() -> List[AnswerRule]:
 # --------------------------------------------------------------------------- #
 def record_pending(entries: Sequence[Dict[str, Any]], url: str = "",
                    path: Optional[Path] = None) -> int:
-    """把未命中的题目写到 data/pending_questions.json，供人工补答案。"""
+    """把未命中的题目写到 data/pending_questions.json，供人工补答案。
+
+    按**题干**去重（同一道题反复运行只记一条）。
+    """
     path = path or PENDING_FILE
     data: Dict[str, Any] = {"updated_at": _now(), "items": []}
     if path.exists():
@@ -445,21 +487,22 @@ def record_pending(entries: Sequence[Dict[str, Any]], url: str = "",
                 data = json.load(fh)
         except (json.JSONDecodeError, OSError):
             pass
-    known = {(it.get("question"), it.get("url")) for it in data.get("items", [])}
+    items = data.setdefault("items", [])
+    known = {(it.get("question") or "").strip() for it in items}
     added = 0
     for e in entries:
-        key = (e.get("question"), url or e.get("url", ""))
-        if key in known:
+        question = (e.get("question") or "").strip()
+        if not question or question in known:
             continue
-        data.setdefault("items", []).append({
-            "question": e.get("question", ""),
+        items.append({
+            "question": question,
             "field": e.get("field", ""),
             "qtype": e.get("qtype", ""),
             "options": e.get("options", []),
             "url": url or e.get("url", ""),
             "first_seen": _now(),
         })
-        known.add(key)
+        known.add(question)
         added += 1
     data["updated_at"] = _now()
     from .config import atomic_write_json

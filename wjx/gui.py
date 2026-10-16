@@ -557,6 +557,8 @@ class BankDialog(tk.Toplevel):
         ):
             ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=3)
         ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
+        self.status = ttk.Label(outer, text="", foreground=OK_COLOR)
+        self.status.pack(anchor="w", pady=(0, 4))
 
         # 未命中题目
         pend = ttk.LabelFrame(outer, text="答案库未命中的题目（可复制题干后新增规则）", padding=6)
@@ -570,12 +572,28 @@ class BankDialog(tk.Toplevel):
 
     # ------------------------------------------------------------------ #
     def _refresh(self) -> None:
+        selected = self.tree.selection()
+        selected_id = selected[0] if selected else None
         self.tree.delete(*self.tree.get_children())
         for rule in self.bank.rules:
-            self.tree.insert("", "end", iid=rule.id, values=(
-                "是" if rule.enabled else "否", rule.match,
-                rule.pattern, str(rule.answer), rule.note,
-            ))
+            # id 兜底：极端情况下（历史文件 id 重复）也不让界面炸掉
+            iid = rule.id
+            n = 2
+            while self.tree.exists(iid):
+                iid = f"{rule.id}#{n}"
+                n += 1
+            try:
+                self.tree.insert("", "end", iid=iid, values=(
+                    "是" if rule.enabled else "否", rule.match,
+                    rule.pattern, str(rule.answer), rule.note,
+                ))
+            except tk.TclError:
+                continue
+        if selected_id and self.tree.exists(selected_id):
+            self.tree.selection_set(selected_id)
+        self._refresh_pending()
+
+    def _refresh_pending(self) -> None:
         from .answers import load_pending
 
         pending = load_pending()
@@ -590,12 +608,18 @@ class BankDialog(tk.Toplevel):
                     str(o.get("label")) for o in it["options"][:10]) + "\n")
         self.pending_text.configure(state="disabled")
 
+    def _say(self, text: str, ok: bool = True) -> None:
+        self.status.configure(text=text, foreground=OK_COLOR if ok else BAD_COLOR)
+        self.app._log_line(f"答案库：{text}", OK_COLOR if ok else BAD_COLOR)
+
+    # ------------------------------------------------------------------ #
     def _selected_rule(self):
         sel = self.tree.selection()
         if not sel:
             return None
+        key = sel[0].split("#")[0]
         for rule in self.bank.rules:
-            if rule.id == sel[0]:
+            if rule.id == key:
                 return rule
         return None
 
@@ -608,74 +632,110 @@ class BankDialog(tk.Toplevel):
             self.var_note.set(rule.note)
 
     def _add(self) -> None:
-        pattern = self.var_pattern.get().strip()
-        if not pattern:
-            messagebox.showwarning("缺少题目", "请先填写题目文字或正则表达式。", parent=self)
-            return
-        answer = self.var_answer.get().strip()
-        if not answer and self.var_match.get() != "expr":
-            messagebox.showwarning("缺少答案", "请填写答案（expr 匹配方式不需要）。", parent=self)
-            return
+        """新增规则。任何异常都会被显示出来，绝不静默失败。"""
         try:
-            self.bank.add_rule(pattern, answer, match=self.var_match.get(), note=self.var_note.get().strip())
+            pattern = self.var_pattern.get().strip()
+            if not pattern:
+                messagebox.showwarning("缺少题目", "请先填写题目文字（或正则表达式）。", parent=self)
+                return
+            match = self.var_match.get()
+            answer = self.var_answer.get().strip()
+            if not answer and match != "expr":
+                messagebox.showwarning("缺少答案", "请填写答案（匹配方式为 expr 时不需要）。", parent=self)
+                return
+            rule, created = self.bank.add_rule_safe(
+                pattern, answer, match=match, note=self.var_note.get().strip())
+            self.bank.save()
+            self.app.scheduler.reload_bank()
+            self._refresh()
+            action = "已新增" if created else "已更新（同一题目的重复规则已合并）"
+            self._say(f"{action}规则 [{rule.id}] {rule.match} {rule.pattern} → {rule.answer}")
+            self.tree.selection_set(rule.id)
+        except tk.TclError as exc:
+            self._say(f"界面刷新失败：{exc}", ok=False)
         except Exception as exc:
-            messagebox.showerror("规则无效", f"{type(exc).__name__}: {exc}", parent=self)
-            return
-        self.bank.save()
-        self.app.scheduler.reload_bank()
-        self._refresh()
-        self.app._log_line(f"答案库已新增规则：{pattern}")
+            import traceback
+
+            traceback.print_exc()
+            self._say(f"新增失败：{type(exc).__name__}: {exc}", ok=False)
+            messagebox.showerror("新增规则失败", f"{type(exc).__name__}: {exc}", parent=self)
 
     def _update_selected(self) -> None:
-        rule = self._selected_rule()
-        if rule is None:
-            return
-        rule.match = self.var_match.get()
-        rule.pattern = self.var_pattern.get().strip()
-        rule.answer = self.var_answer.get().strip()
-        rule.note = self.var_note.get().strip()
-        if rule.match == "regex":
-            import re as _re
-
-            try:
-                rule._regex = _re.compile(rule.pattern, _re.I)
-            except _re.error as exc:
-                messagebox.showerror("正则无效", str(exc), parent=self)
+        try:
+            rule = self._selected_rule()
+            if rule is None:
+                messagebox.showinfo("提示", "请先在列表中选择要修改的规则。", parent=self)
                 return
-        elif rule.match == "text":
-            import re as _re
+            match = self.var_match.get()
+            pattern = self.var_pattern.get().strip()
+            answer = self.var_answer.get().strip()
+            if not pattern:
+                messagebox.showwarning("缺少题目", "题目文字不能为空。", parent=self)
+                return
+            if match == "regex":
+                import re as _re
 
-            rule._regex = _re.compile(_re.escape(rule.pattern), _re.I)
-        self.bank.save()
-        self.app.scheduler.reload_bank()
-        self._refresh()
-        self.app._log_line(f"答案库已更新规则：{rule.pattern}")
+                try:
+                    rule._regex = _re.compile(pattern, _re.I)
+                except _re.error as exc:
+                    messagebox.showerror("正则无效", str(exc), parent=self)
+                    return
+            elif match == "text":
+                import re as _re
+
+                rule._regex = _re.compile(_re.escape(pattern), _re.I)
+            rule.match, rule.pattern, rule.answer = match, pattern, answer
+            rule.note = self.var_note.get().strip()
+            self.bank.save()
+            self.app.scheduler.reload_bank()
+            self._refresh()
+            self._say(f"已保存修改：{rule.pattern} → {rule.answer}")
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            self._say(f"保存失败：{type(exc).__name__}: {exc}", ok=False)
+            messagebox.showerror("保存修改失败", f"{type(exc).__name__}: {exc}", parent=self)
 
     def _remove_selected(self) -> None:
-        rule = self._selected_rule()
-        if rule is None:
-            return
-        if not messagebox.askyesno("删除规则", f"确定删除规则「{rule.pattern}」？", parent=self):
-            return
-        self.bank.remove_rule(rule.id)
-        self.bank.save()
-        self.app.scheduler.reload_bank()
-        self._refresh()
+        try:
+            rule = self._selected_rule()
+            if rule is None:
+                messagebox.showinfo("提示", "请先在列表中选择要删除的规则。", parent=self)
+                return
+            if not messagebox.askyesno("删除规则", f"确定删除规则「{rule.pattern}」？", parent=self):
+                return
+            self.bank.remove_rule(rule.id)
+            self.bank.save()
+            self.app.scheduler.reload_bank()
+            self._refresh()
+            self._say(f"已删除规则：{rule.pattern}")
+        except Exception as exc:
+            self._say(f"删除失败：{type(exc).__name__}: {exc}", ok=False)
 
     def _toggle_selected(self) -> None:
-        rule = self._selected_rule()
-        if rule is None:
-            return
-        rule.enabled = not rule.enabled
-        self.bank.save()
-        self.app.scheduler.reload_bank()
-        self._refresh()
+        try:
+            rule = self._selected_rule()
+            if rule is None:
+                messagebox.showinfo("提示", "请先在列表中选择规则。", parent=self)
+                return
+            rule.enabled = not rule.enabled
+            self.bank.save()
+            self.app.scheduler.reload_bank()
+            self._refresh()
+            self._say(f"规则 [{'启用' if rule.enabled else '停用'}]：{rule.pattern}")
+        except Exception as exc:
+            self._say(f"操作失败：{type(exc).__name__}: {exc}", ok=False)
 
     def _reload(self) -> None:
-        from .answers import AnswerBank
+        try:
+            from .answers import AnswerBank
 
-        self.bank = AnswerBank.load()
-        self._refresh()
+            self.bank = AnswerBank.load()
+            self._refresh()
+            self._say(f"已重新载入：{len(self.bank.rules)} 条规则")
+        except Exception as exc:
+            self._say(f"重新载入失败：{type(exc).__name__}: {exc}", ok=False)
 
     def _save(self) -> None:
         self.bank.save()

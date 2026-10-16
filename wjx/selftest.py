@@ -242,6 +242,27 @@ def test_answers_bank() -> None:
     _check("记住的答案可复用", m.ok and m.answer == "记住的答案" and m.source == "remembered",
            f"{m.answer}/{m.source}")
 
+    # 新增规则：id 唯一 + 同题目重复新增时合并而不是插入重复项（GUI 曾因 id 冲突而"点了没反应"）
+    gui_bank = AnswerBank()
+    gui_bank.add_rule("你最喜欢的颜色", "蓝色")
+    gui_bank.add_rule("你最喜欢的颜色", "红色")
+    _check("同一题目重复新增会合并（不产生重复规则）",
+           len(gui_bank.rules) == 1 and gui_bank.rules[0].answer == "红色",
+           str([(r.id, r.answer) for r in gui_bank.rules]))
+    ids = set()
+    clash = False
+    for p in ("你最喜欢的颜色", "你的年龄", "你的年龄", "your age", "你的年龄"):
+        rule = gui_bank.add_rule(p, "x") if p not in ("你最喜欢的颜色",) else None
+    for i in range(5):
+        r = gui_bank.add_rule(f"题目{i}", f"答案{i}", match="text")
+        if r.id in ids:
+            clash = True
+        ids.add(r.id)
+    _check("新增规则的 id 不会重复", not clash, str(sorted(ids)))
+    _check("中文题目也能生成可读 id",
+           any("你" in r.id or "题" in r.id for r in gui_bank.rules),
+           str([r.id for r in gui_bank.rules]))
+
     # 题库读写往返
     import shutil
     from pathlib import Path
@@ -311,9 +332,40 @@ def test_page_state() -> None:
     closed_html = "<html><body><p>此问卷已结束，感谢您的参与</p></body></html>"
     _check("识别已结束", detect_page_state(closed_html) == "closed")
 
+    paused_html = "<html><body><p>提示信息</p><p>很抱歉，此问卷(389236309)已暂停，不能填写！</p></body></html>"
+    _check("识别已暂停/不能填写", detect_page_state(paused_html) == "closed")
+
     ok_html = "<html><body><p>程序测试 1. 11-4</p></body></html>"
     _check("正常页面不误判为未开放/已结束", detect_page_state(ok_html) == "ok")
     _check("无正文时返回 unknown", detect_page_state("<html><body></body></html>") == "unknown")
+
+
+def test_open_time_derivation() -> None:
+    """从"尚未开放"提示页推导开始时间（绝对时间与倒计时两种形态）。"""
+    import datetime as _dt
+
+    from .questionnaire import extract_open_datetime, extract_open_time
+
+    now = _dt.datetime(2026, 10, 16, 16, 49, 0)
+
+    absolute = ("<html><body><p>很抱歉，此问卷将于2026-10-16 16:55（北京时间）开放，"
+                "请到时再进入此页面进行填写！</p></body></html>")
+    when, secs = extract_open_datetime(absolute, now=now)
+    _check("绝对时间推导开放时间", when == "2026-10-16 16:55:00", when)
+    _check("绝对时间算出剩余秒数", secs == 6 * 60, str(secs))
+
+    countdown = "<html><body><p>距离开始还有0天0时9分59秒</p></body></html>"
+    when, secs = extract_open_datetime(countdown, now=now)
+    _check("倒计时推导开放时间（9分59秒 → 16:58:59）", when == "2026-10-16 16:58:59", when)
+    _check("倒计时剩余秒数正确", secs == 9 * 60 + 59, str(secs))
+
+    hours = "<html><body><p>距离开始还有1天2时3分4秒</p></body></html>"
+    _, secs = extract_open_datetime(hours, now=now)
+    _check("带天/小时的倒计时", secs == 86400 + 2 * 3600 + 3 * 60 + 4, str(secs))
+
+    _check("没有时间信息时返回空", extract_open_datetime("<p>随便什么</p>", now=now) == ("", 0))
+    _check("extract_open_time 兼容旧接口",
+           extract_open_time(absolute).startswith("2026-10-16 16:55"))
 
 
 # --------------------------------------------------------------------------- #
@@ -513,6 +565,7 @@ def run() -> int:
     test_answers_bank()
     test_questionnaire_parse()
     test_page_state()
+    test_open_time_derivation()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)

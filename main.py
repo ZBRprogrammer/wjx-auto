@@ -193,6 +193,98 @@ def cmd_bank(args) -> int:
     return 2
 
 
+def cmd_autostart(args) -> int:
+    """为"没有填写开始时间"的任务推导开始时间并在到点后执行。
+
+    流程：读题页 → 从"将于 X 开放 / 距离开始还有…"推导开放时间
+          → 写回任务的开始时间 → 等到那个时刻 → 自动填写提交。
+
+    这样即使问卷星没告诉你开放时间，也能自动拿到并准时提交。
+    """
+    cfg = _apply_cli_overrides(args, _load(args))
+    _ensure_mock_server(cfg)
+    from wjx import autorun
+    from wjx.questionnaire import extract_open_datetime, fetch_html
+
+    task = cfg.find(args.task) if args.task else None
+    url = args.url or (task.url if task else "")
+    if not url:
+        print("请通过 --url 或 --task 指定问卷", file=sys.stderr)
+        return 2
+    task = task or Task(name=args.name or "自动定时任务", url=url)
+    bank = _bank(args)
+
+    # 手动指定开始时间时跳过推导
+    if args.at:
+        task.start_at = args.at
+        if not cfg.find(task.id):
+            cfg.tasks.append(task)
+        config_mod.save_config(cfg, getattr(args, "config", None))
+        print(f"已按手动指定的开始时间写入任务：{task.name} @ {task.start_at}")
+        if args.no_run:
+            return 0
+        return _execute_task(cfg, task, bank, args)
+
+    # 1) 先看问卷当前是什么状态
+    res = autorun.probe_questions(cfg, url, prefer_browser=not args.static, bank=bank)
+    print(res.report())
+
+    if res.state == "ok":
+        print("问卷当前已开放，无需推导开始时间。")
+        if not args.no_run:
+            return _execute_task(cfg, task, bank, args)
+        return 0
+    if res.state != "not_open":
+        print(f"无法推导开始时间（页面状态 {res.state}）", file=sys.stderr)
+        return 1
+
+    when, seconds = res.open_time, res.open_seconds
+    if not when:
+        page = ""
+        try:
+            page = fetch_html(url)
+        except Exception as exc:
+            print(f"读取开放时间失败: {exc}", file=sys.stderr)
+        when, seconds = extract_open_datetime(page)
+    if not when:
+        print("未能从页面推导出开放时间；请手动指定 --at", file=sys.stderr)
+        return 1
+
+    # 2) 写回任务的开始时间
+    task.start_at = when
+    if not cfg.find(task.id):
+        cfg.tasks.append(task)
+    config_mod.save_config(cfg, getattr(args, "config", None))
+    print(f"\n✔ 已推导开始时间：{when}（距今约 {seconds // 60} 分 {seconds % 60} 秒）")
+    print(f"  任务「{task.name}」已写入配置，到点后会自动读题→检索答案→填写提交。")
+
+    if args.no_run:
+        return 0
+
+    # 3) 等到点再执行（最多再等 --max-wait 秒）
+    max_wait = int(args.max_wait or (seconds + 120))
+    print(f"  开始等待（最长 {max_wait // 60} 分钟）… 到时自动执行；Ctrl+C 可中止等待。")
+    res2 = autorun.probe_until_open(cfg, url, bank=bank, max_wait=seconds + 60,
+                                    on_wait=lambda r, remain, n: print(
+                                        f"  … 尚未开放，剩余约 {int(remain)} 秒，{n} 次重试后继续",
+                                        flush=True))
+    if res2.state != "ok":
+        print(f"等待结束但问卷仍未开放：{res2.report()}", file=sys.stderr)
+        return 1
+    print("  问卷已开放，开始填写提交 …")
+    return _execute_task(cfg, task, bank, args)
+
+
+def _execute_task(cfg: AppConfig, task: Task, bank, args) -> int:
+    from wjx import autorun
+
+    rec = autorun.run_task(cfg, task, bank=bank, dry_run=args.dry_run)
+    config_mod.save_config(cfg, getattr(args, "config", None))
+    print(json.dumps(rec.to_dict(), ensure_ascii=False, indent=2))
+    print(f"\n判定: {RESULT_TEXT.get(rec.result_enum, rec.result)}")
+    return 0 if rec.result == "success" else 1
+
+
 def cmd_learn(args) -> int:
     """交互式补答案：读取问卷题目，对未命中的题目逐个询问并写入答案库。"""
     cfg = _load(args)
@@ -661,6 +753,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--note", default="")
     p.add_argument("--bank-file", default=None, help="指定答案库文件（默认 data/answer_bank.json）")
     p.set_defaults(func=cmd_bank)
+
+    p = sub.add_parser("autostart", parents=[common],
+                       help="没有开始时间的任务：从问卷页推导开放时间，到点自动填写")
+    p.add_argument("--url", default="")
+    p.add_argument("--task", default="", help="已有任务名/id（省略则新建）")
+    p.add_argument("--name", default="", help="新建任务的名字")
+    p.add_argument("--at", default="", help="手动指定开始时间（跳过推导）")
+    p.add_argument("--static", action="store_true", help="用 HTTP 解析推导（不启动浏览器）")
+    p.add_argument("--no-run", action="store_true", help="只推导并写入任务，不等待执行")
+    p.add_argument("--dry-run", action="store_true", help="到点后只检索答案不提交")
+    p.add_argument("--max-wait", type=int, default=0, help="最多等待多少秒（默认=距开放时间+2分钟）")
+    p.add_argument("--headed", action="store_true")
+    p.add_argument("--backend", default=None, choices=["auto", "mock", "selenium"])
+    p.add_argument("--browser", default=None, choices=["edge", "chrome"])
+    p.set_defaults(func=cmd_autostart)
 
     p = sub.add_parser("learn", help="交互式为未命中的题目补答案（写入答案库）", parents=[common])
     p.add_argument("--url", default="", help="问卷网址；省略则处理 pending 列表")

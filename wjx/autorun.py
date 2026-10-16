@@ -34,6 +34,7 @@ class Resolution:
     source: str = ""                 # browser | static | mock
     state: str = "ok"                # ok | not_open | closed | unknown
     open_time: str = ""              # 问卷尚未开放时的开放时间（如 "2026-10-16 16:32"）
+    open_seconds: int = 0            # 距离开放的秒数（由提示页的倒计时推导）
     questions: List[Question] = field(default_factory=list)
     matches: List[Match] = field(default_factory=list)
     error: str = ""
@@ -65,7 +66,8 @@ class Resolution:
     def report(self, show_options: bool = True) -> str:
         if self.state == "not_open":
             when = f"（开放时间 {self.open_time}）" if self.open_time else ""
-            return f"问卷尚未开放{when}：{self.url}"
+            countdown = f"，还有 {_human_seconds(self.open_seconds)}" if self.open_seconds else ""
+            return f"问卷尚未开放{when}{countdown}：{self.url}"
         if self.state == "closed":
             return f"问卷已结束/停止收集：{self.url}"
         if self.error:
@@ -91,6 +93,17 @@ def _fmt(value: Any) -> str:
     return f"{value!r}"
 
 
+def _human_seconds(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h} 小时 {m} 分 {s} 秒"
+    if m:
+        return f"{m} 分 {s} 秒"
+    return f"{s} 秒"
+
+
 # --------------------------------------------------------------------------- #
 # 题目提取（统一入口）
 # --------------------------------------------------------------------------- #
@@ -106,7 +119,15 @@ def probe_questions(cfg: AppConfig, url: str, prefer_browser: bool = True,
     res = Resolution(url=url)
     bank = bank or AnswerBank.load()
     from .drivers import is_mock_url
-    from .questionnaire import detect_page_state, extract_open_time, fetch_html
+    from .questionnaire import (detect_page_state, extract_open_datetime,
+                                extract_open_time, fetch_html)
+
+    def _apply_state(page: str) -> None:
+        res.state = detect_page_state(page)
+        if res.state == "not_open":
+            when, seconds = extract_open_datetime(page)
+            res.open_time = when or extract_open_time(page)
+            res.open_seconds = seconds
 
     try:
         if is_mock_url(url, cfg.settings):
@@ -115,8 +136,7 @@ def probe_questions(cfg: AppConfig, url: str, prefer_browser: bool = True,
             questions, source = _probe_browser(cfg, url, driver), "browser"
         else:
             page = fetch_html(url)
-            res.state = detect_page_state(page)
-            res.open_time = extract_open_time(page) if res.state == "not_open" else ""
+            _apply_state(page)
             if res.state in ("not_open", "closed"):
                 res.source = "static"
                 res.elapsed = time.time() - started
@@ -144,9 +164,7 @@ def probe_questions(cfg: AppConfig, url: str, prefer_browser: bool = True,
             except Exception:
                 html = ""
         if html:
-            res.state = detect_page_state(html)
-            if res.state == "not_open":
-                res.open_time = extract_open_time(html)
+            _apply_state(html)
         if res.state == "unknown":
             res.state = "unknown"
     res.matches = bank.resolve_many(res.questions)

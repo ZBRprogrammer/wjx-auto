@@ -435,6 +435,8 @@ class SeleniumDriver(FillDriver):
             else:
                 result, message = classify_post_submit(url_before, url_after, page_text, dialog_text)
             note = "" if clicked else "（未找到提交按钮，可能已提交过或页面结构异常）"
+            if not clicked and not page_text.strip():
+                note = "（未找到提交按钮，且页面无内容：问卷可能已被暂停/结束）"
             if unfilled:
                 note += f"（{len(unfilled)} 个字段回读为空: {', '.join(unfilled[:4])}）"
             outcome = FillOutcome(

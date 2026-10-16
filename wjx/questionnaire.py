@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .logging_setup import get_logger
 
@@ -64,14 +64,23 @@ NOT_OPEN_STRONG: Sequence[str] = (
     "开放，请到时再进入", "请到时再进入", "距离开始还有", "尚未开始",
     "问卷尚未开始", "还未开始", "未到开放时间", "不在开放时间",
 )
-# 问卷已结束 / 停止收集
+# 问卷已结束 / 停止收集 / 被暂停（实测："很抱歉，此问卷(389236309)已暂停，不能填写！"）
 CLOSED_PATTERNS: Sequence[str] = (
-    "已结束", "已停止", "停止收集", "问卷已关闭", "不在收集", "已暂停",
+    "已结束", "已停止", "停止收集", "问卷已关闭", "不在收集", "已暂停", "不能填写",
+    "暂停回收", "无法填写", "已停用",
 )
 # "将于 <时间> 开放" 形态（时间可以是具体时刻或"倒计时"）
 NOT_OPEN_OPEN_RE = re.compile(r"将于.{0,24}?(?:开放|开始)")
 _DATETIME_RE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}")
 _DHM_RE = re.compile(r"\d+\s*天\s*\d+\s*时\s*\d+\s*分")
+# "2026-10-16 16:55:00" / "2026-10-16 16:55"（也容忍 / 分隔与中文年月日）
+_DT_TEXT_RE = re.compile(
+    r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?"
+)
+# "0天0时9分59秒" / "9分59秒" / "1小时2分3秒"
+_COUNTDOWN_RE = re.compile(
+    r"(?:(\d+)\s*天)?\s*(?:(\d+)\s*(?:小时|时))?\s*(?:(\d+)\s*分)?\s*(?:(\d+)\s*秒)"
+)
 
 
 def detect_page_state(html: str) -> str:
@@ -95,12 +104,50 @@ def detect_page_state(html: str) -> str:
     return "ok"
 
 
+def extract_open_datetime(html: str, now: Optional[Any] = None) -> Tuple[str, int]:
+    """从"尚未开放"提示页推导开放时间。
+
+    返回 ``(开始时间 "YYYY-MM-DD HH:MM:SS", 距离开始的秒数)``；无法推导时返回 ``("", 0)``。
+
+    支持两种页面形态（问卷星实测都有）：
+    * 绝对时间: "此问卷将于2026-10-16 16:55（北京时间）开放"
+    * 倒计时  : "距离开始还有0天0时9分59秒"
+    """
+    import datetime as _dt
+
+    now = now or _dt.datetime.now()
+    text = re.sub(r"<script.*?</script>", " ", html or "", flags=re.S | re.I)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    m = _DT_TEXT_RE.search(text)
+    if m:
+        y, mo, d, h, mi, se = (int(g) if g else 0 for g in m.groups())
+        try:
+            target = _dt.datetime(y, mo, d, h, mi, se)
+        except ValueError:
+            target = None
+        if target:
+            delta = int((target - now).total_seconds())
+            if -3600 < delta < 7 * 86400:
+                return target.strftime("%Y-%m-%d %H:%M:%S"), max(0, delta)
+
+    m = _COUNTDOWN_RE.search(text)
+    if m:
+        days, hours, minutes, seconds = (int(g) if g else 0 for g in m.groups())
+        total = days * 86400 + hours * 3600 + minutes * 60 + seconds
+        target = now + _dt.timedelta(seconds=total)
+        return target.strftime("%Y-%m-%d %H:%M:%S"), total
+    return "", 0
+
+
 def extract_open_time(html: str) -> str:
     """尽量从提示页里提取开放时间（用于日志与提醒）。"""
+    when, _ = extract_open_datetime(html)
+    if when:
+        return when[:16]
     text = re.sub(r"<[^>]+>", " ", html or "")
-    m = re.search(r"将于\s*(\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)", text)
-    if m:
-        return m.group(1)
     m = _DATETIME_RE.search(text)
     return m.group(0) if m else ""
 

@@ -227,7 +227,7 @@ class Scheduler:
 
     def _maybe_prepare(self, task: Task, start: datetime, now: datetime) -> None:
         """真实后端：到"提前 prepare_minutes 分钟"时先把页面打开（后台预加载）。"""
-        if not task.preopen or self.cfg.settings.backend != "selenium":
+        if not task.preopen or self.cfg.settings.backend == "mock":
             return
         prepare_at = start - timedelta(minutes=max(1, int(task.prepare_minutes)))
         if now < prepare_at:
@@ -236,17 +236,36 @@ class Scheduler:
         key = start.strftime("%Y-%m-%d %H:%M")
         if entry and entry[2] == key:
             return
+        # 预打开失败后退避重试：实测浏览器起不来时会每 4 秒重试一次，刷满日志
+        fail_key = f"prepare:{task.id}:{key}"
+        if fail_key in self._next_retry:
+            return
         try:
             driver = self._get_driver(task)
             handle = driver.prepare(task)
             self._prepared[task.id] = (driver, handle, key)
+            self._fail_streak.pop(fail_key, None)
             log.info("已提前打开页面：%s", task.url)
             self._emit("prepared", task)
         except DriverUnavailable as exc:
-            log.error("预打开失败（后端不可用）：%s", exc)
-            self._emit("error", task, message=str(exc))
+            self._prepare_backoff(task, fail_key, exc)
         except Exception as exc:
-            log.warning("预打开失败：%s", exc)
+            self._prepare_backoff(task, fail_key, exc)
+
+    def _prepare_backoff(self, task: Task, fail_key: str, exc: Exception) -> None:
+        streak = self._fail_streak.get(fail_key, 0) + 1
+        self._fail_streak[fail_key] = streak
+        if streak >= 3:
+            self._next_retry[fail_key] = time.time() + 3600   # 本次计划时间内不再尝试预打开
+            log.error("预打开连续失败 %d 次，本计划时间内不再预先打开浏览器：%s",
+                      streak, str(exc)[:200])
+            self._emit("prepare_giveup", task, streak=streak)
+        else:
+            delay = 20.0 * streak
+            self._next_retry[fail_key] = time.time() + delay
+            log.warning("预打开失败（第 %d 次），%d 秒后重试：%s",
+                        streak, int(delay), str(exc)[:200])
+            self._emit("error", task, message=f"预打开失败（第 {streak} 次）")
 
     def _close_all_prepared(self) -> None:
         for tid, (driver, handle, _key) in list(self._prepared.items()):
