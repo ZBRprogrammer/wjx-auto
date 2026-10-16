@@ -173,6 +173,22 @@ class Scheduler:
         if not due:
             return
         ctx = self.context()
+
+        # 同组串行化：若某分组已有任务在运行，则本组其它任务本轮一律不启动。
+        # 必须这样做 —— 否则 A、B 到点时间非常接近时，B 可能在 A 完成前就被拉起，
+        # 从而绕过"同组互斥 / 优先级"，造成重复提交（实测竞态：A、B 都提交成功）。
+        busy_groups = {t.group.strip() for t in tasks
+                       if t.group.strip() and t.id in self._running}
+        if busy_groups:
+            held = [t for t in due if t.group.strip() in busy_groups]
+            for t in held:
+                log.info("分组「%s」已有任务在执行，%s 本轮暂缓（同组串行）",
+                         t.group.strip(), t.name)
+                self._emit("group_wait", t, group=t.group.strip())
+            due = [t for t in due if t.group.strip() not in busy_groups]
+            if not due:
+                return
+
         decision = decide(due, ctx)
         for tid, reason in decision.reasons.items():
             self._skip_reason[tid] = reason

@@ -483,6 +483,61 @@ def test_mock_template_consistency() -> None:
         httpd.server_close()
 
 
+def test_group_serialization() -> None:
+    """同组任务必须串行：A 运行中时 B 不得启动（否则会绕过互斥导致重复提交）。
+
+    这是确定性写法：先让 A 处于"运行中"，再断言同组的 B 不被启动。
+    早期版本存在竞态——A、B 到点时间接近时两者都会被拉起（实测都提交成功）。
+    """
+    from .mockserver import create_server
+
+    httpd = create_server(port=8795)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    base = "http://127.0.0.1:8795"
+    try:
+        cfg = AppConfig()
+        cfg.settings.backend = "mock"
+        cfg.settings.mock_base_url = base
+        cfg.settings.respect_min_interval = 0
+        cfg.settings.auto_answer = False
+        a = Task(id="ga", name="组内A", url=f"{base}/vm/A.aspx?force=ok",
+                 answers={"q1": "1", "q2": "A", "q3": "7"},
+                 start_at=_past(), group="G", priority=10)
+        b = Task(id="gb", name="组内B", url=f"{base}/vm/B.aspx?force=ok",
+                 answers={"q1": "2", "q2": "B", "q3": "7"},
+                 start_at=_past(), group="G", priority=5)
+        cfg.tasks = [a, b]
+        sched = Scheduler(cfg, config_path=False)
+
+        # 用"假运行中"制造确定性场景：A 已在跑，B 同组到点
+        blocker = threading.Event()
+        sched._running["ga"] = threading.Thread(target=blocker.wait, daemon=True)
+        sched._running["ga"].start()
+        try:
+            sched._tick()
+            _check("同组已有任务在跑时，另一同组任务本轮不启动",
+                   b.attempts == 0 and b.status_enum == TaskStatus.IDLE,
+                   f"B.attempts={b.attempts} B.status={b.status}")
+        finally:
+            blocker.set()
+            sched._running["ga"].join(timeout=5)
+            sched._running.pop("ga", None)
+
+        # 解除阻塞后再 tick：这次应正常按优先级启动
+        sched._tick()
+        time.sleep(0.4)
+        _join(sched, a)
+        _check("阻塞解除后 A 正常启动并提交成功",
+               a.status_enum == TaskStatus.SUCCESS, f"A={a.status}")
+        _check("A 成功后同组 B 被判跳过（互斥）",
+               b.status_enum == TaskStatus.SKIPPED and b.attempts == 0,
+               f"B={b.status} attempts={b.attempts}")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 # --------------------------------------------------------------------------- #
 def test_backend_and_scheduler() -> None:
     httpd = mockserver.create_server(port=8791)
@@ -687,6 +742,7 @@ def run() -> int:
     test_open_time_derivation()
     test_dialog_button_texts()
     test_mock_template_consistency()
+    test_group_serialization()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)
