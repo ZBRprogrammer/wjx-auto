@@ -1,0 +1,14 @@
+# 依赖说明
+#
+# 本 demo 默认使用内置的“模拟问卷”后端，**不需要任何第三方库**：
+#   python main.py mock   # 启动本地模拟问卷服务（另一个终端）
+#   python main.py gui    # 打开图形界面（首次会自动拉起 mock 服务）
+#
+# 需要连接真实问卷星时再安装浏览器自动化依赖：
+#   pip install --target vendor selenium
+# 并下载与本机浏览器版本匹配的驱动（Edge: msedgedriver / Chrome: chromedriver），
+# 在 GUI 的「设置 → 浏览器驱动路径」中填写，或让 selenium-manager 自动查找。
+#
+# 开发期可选（更精确的答题页解析）：
+#   pip install --target vendor beautifulsoup4 lxml
+selenium>=4.10 ; extra == "selenium"
