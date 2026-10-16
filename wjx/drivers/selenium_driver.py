@@ -722,8 +722,10 @@ def _option_position(options: Sequence[Dict[str, Any]], matched: Dict[str, Any])
 
 
 # 问卷星常见"拦路"弹窗（点掉才能继续填）
+# 注意："确认" 和 "确定" 都要有 —— 实测"是否继续上次回答"弹窗的按钮是【确认】，
+# 漏掉它就会去点【取消】，于是每次进入页面都把恢复作答取消掉、提交按钮也就点不到。
 DIALOG_ACCEPT_TEXTS: Sequence[str] = (
-    "继续上次回答", "继续回答", "继续填写", "继续", "确定", "好的", "是",
+    "继续上次回答", "继续回答", "继续填写", "继续", "确认", "确定", "好的", "是", "同意",
 )
 DIALOG_REJECT_TEXTS: Sequence[str] = (
     "重新填写", "放弃", "取消", "否",
@@ -738,25 +740,63 @@ const vis = el => {
   const r = el.getBoundingClientRect();
   return r.width > 0 && r.height > 0;
 };
-// 收集"看起来像弹窗/提示"的容器
-const containers = Array.from(document.querySelectorAll(
+const textOf = el => (el.innerText || el.value || '').trim();
+
+// 1) 先按常见弹窗容器找（layui/layer/ui-dialog 等）
+let containers = Array.from(document.querySelectorAll(
   '.layui-layer, .layui-layer-content, .layer-content, .ui-dialog, .popup, ' +
   '#popup_container, #divTip, .modal, .jq-toast-single, [class*=dialog], [class*=popup]'))
   .filter(vis);
-const texts = containers.map(c => (c.innerText || '').trim()).filter(Boolean).join(' | ');
-if (!containers.length) return {text: '', clicked: ''};
-// 优先点"继续"类按钮
-const all = containers.flatMap(c => Array.from(c.querySelectorAll('a,button,div,span,input[type=button],input[type=submit]')));
-const pick = (words) => all.find(el => {
-  if (!vis(el)) return false;
-  const t = (el.innerText || el.value || '').trim();
-  return t.length > 0 && t.length <= 12 && words.some(w => t === w || t.includes(w));
-});
-let target = pick(accept);
+
+// 2) 容器没找到（各问卷模板 class 不同）时，退化为"按提示文字定位"：
+//    找到含提示文字的最小可见元素，用它的祖先作为弹窗范围
+if (!containers.length) {
+  const hints = ['是否继续上次回答', '继续上次', '继续回答', '是否继续'];
+  let node = null;
+  for (const el of document.querySelectorAll('body *')) {
+    if (!vis(el)) continue;
+    const t = textOf(el);
+    if (!t || t.length > 60) continue;
+    if (hints.some(h => t.includes(h))) { node = el; break; }
+  }
+  if (node) {
+    let box = node;
+    for (let i = 0; i < 4 && box.parentElement; i++) {
+      box = box.parentElement;
+      const btns = Array.from(box.querySelectorAll('a,button,div,span,input'))
+        .filter(e => vis(e) && /继续|确定|好的|重新|取消/.test(textOf(e)));
+      if (btns.length) break;
+    }
+    containers = [box];
+  }
+}
+const texts = containers.map(c => textOf(c)).filter(Boolean).join(' | ');
+if (!containers.length) return {text: '', clicked: '', scan: 'none'};
+
+// 3) 在整个文档里找可点按钮（不限容器），优先"继续"，其次"确定/好的"
+const all = Array.from(document.querySelectorAll('a,button,div,span,input,li')).filter(vis);
+const pick = (words) => {
+  // 只取"最小"的可点元素：按钮文字通常就写在最内层元素里，
+  // 取外层容器会把整段弹窗文字也算进来，容易误判。
+  const hits = [];
+  for (const el of all) {
+    const t = textOf(el);
+    if (!t || t.length > 14) continue;
+    const w = words.find(word => t === word || t.includes(word));
+    if (w) hits.push({el: el, text: t, rank: t === w ? 0 : 1, len: t.length});
+  }
+  hits.sort((a, b) => a.rank - b.rank || a.len - b.len);
+  return hits[0] || null;
+};
+const picked = pick(accept);
+let target = picked ? picked.el : null;
 let clicked = '';
-if (target) { clicked = (target.innerText || target.value || '').trim(); }
-else { target = pick(reject); if (target) clicked = (target.innerText || target.value || '').trim(); }
-if (target) { target.click(); }
+if (target) clicked = picked.text;
+else { const r = pick(reject); if (r) { target = r.el; clicked = r.text; } }
+if (target) {
+  try { target.scrollIntoView({block: 'center'}); } catch (e) {}
+  target.click();
+}
 return {text: texts.slice(0, 200), clicked: clicked};
 """
 

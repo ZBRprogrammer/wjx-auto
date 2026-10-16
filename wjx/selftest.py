@@ -392,6 +392,17 @@ def test_open_time_derivation() -> None:
            extract_open_time(absolute).startswith("2026-10-16 16:55"))
 
 
+def test_dialog_button_texts() -> None:
+    """拦路弹窗的按钮文案表（回归：漏了"确认"会去点"取消"）。"""
+    from .drivers.selenium_driver import DIALOG_ACCEPT_TEXTS, DIALOG_REJECT_TEXTS
+
+    _check("接受类包含『确认』（问卷星实际按钮文案）", "确认" in DIALOG_ACCEPT_TEXTS)
+    _check("接受类包含『确定』与『继续』",
+           "确定" in DIALOG_ACCEPT_TEXTS and any("继续" in w for w in DIALOG_ACCEPT_TEXTS))
+    _check("『取消』属于拒绝类，不会被当成接受",
+           "取消" in DIALOG_REJECT_TEXTS and "取消" not in DIALOG_ACCEPT_TEXTS)
+
+
 # --------------------------------------------------------------------------- #
 def test_backend_and_scheduler() -> None:
     httpd = mockserver.create_server(port=8791)
@@ -590,6 +601,7 @@ def run() -> int:
     test_questionnaire_parse()
     test_page_state()
     test_open_time_derivation()
+    test_dialog_button_texts()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)
