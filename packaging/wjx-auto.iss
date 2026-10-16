@@ -269,14 +269,53 @@ begin
          mbInformation, MB_OK);
 end;
 
+// 关键：Inno 需要先把安装包解包到 %TEMP%\is-XXXX.tmp。
+// 如果这个临时目录不可写（受控文件夹访问 / 杀软拦截会这样），
+// 就会在"安装程序无法创建目录 ...\Temp\is-XXXX.tmp / 错误 5"处直接失败，
+// 连日志文件都写不出来。这里提前发现并给出可执行的建议。
 function InitializeSetup(): Boolean;
+var
+  TmpOk: Boolean;
+  ReportFile: String;
+  Answer: Integer;
 begin
   Result := True;
-  // 注意：/TESTDIRS 是开关型参数，不是 key=value，所以直接从原始命令行找
+
+  // 显式请求自诊断：只诊断，不安装
   if Pos('TESTDIRS', UpperCase(GetCmdTail)) > 0 then
   begin
     RunDirDiagnostics();
-    Result := False;      // 只诊断，不安装
+    Result := False;
+    Exit;
+  end;
+
+  // 静默安装时不打扰，交给命令行使用者自己判断
+  if Pos('SILENT', UpperCase(GetCmdTail)) > 0 then
+    Exit;
+
+  TmpOk := DirLooksWritable(ExpandConstant('{tmp}'));
+  if not TmpOk then
+  begin
+    Answer := MsgBox(
+      '检测到系统的临时目录不可写，安装程序无法解包，因此不能继续安装：' + #13#10 +
+      '    ' + ExpandConstant('{tmp}') + #13#10 + #13#10 +
+      '常见原因是「Windows 安全中心 → 病毒和威胁防护 → 勒索软件防护（受控文件夹访问）」' + #13#10 +
+      '或第三方安全软件（360、火绒、腾讯电脑管家等）拦截了对用户临时目录的写入。' + #13#10 + #13#10 +
+      '可以选择：' + #13#10 +
+      '  · 确定：现在把"目录可写性"诊断报告写到桌面/文档，便于进一步定位；' + #13#10 +
+      '  · 取消：使用免安装的绿色版（推荐，完全不依赖临时目录）。',
+      mbConfirmation, MB_OKCANCEL);
+    if Answer = IDOK then
+    begin
+      RunDirDiagnostics();
+    end
+    else
+    begin
+      MsgBox('请改用绿色版：把发行包里的 dist\wjx-auto 整个文件夹拷到任意可写位置' + #13#10 +
+             '（例如 D:\wjx-auto），双击 wjx-auto-gui.exe 即可，无需安装。',
+             mbInformation, MB_OK);
+    end;
+    Result := False;
   end;
 end;
 

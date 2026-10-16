@@ -146,6 +146,29 @@ def report() -> None:
     print("=" * 68)
 
 
+def build_portable_zip() -> int:
+    """把绿色版目录压成一个 zip，供"装不上/临时目录被拦"的环境直接解压使用。"""
+    src = ROOT / "dist" / "wjx-auto"
+    if not (src / "wjx-auto-gui.exe").exists():
+        print("未找到 dist/wjx-auto，跳过绿色版压缩包")
+        return 1
+    SETUP_OUT.mkdir(parents=True, exist_ok=True)
+    zip_path = SETUP_OUT / f"wjx-auto-{app_version()}-portable.zip"
+    if zip_path.exists():
+        zip_path.unlink()
+    print(f"正在打包绿色版 zip：{zip_path.name}（约 1~2 分钟）")
+    # 用 .NET 压缩（比 Compress-Archive 快很多，且不产生额外临时副本）
+    script = (
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem; "
+        f"[System.IO.Compression.ZipFile]::CreateFromDirectory('{src}', '{zip_path}', "
+        "[System.IO.Compression.CompressionLevel]::Optimal, $false)"
+    )
+    code = subprocess.call(["powershell", "-NoProfile", "-Command", script])
+    if code == 0 and zip_path.exists():
+        print(f"绿色版压缩包：{zip_path}  ({zip_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    return code
+
+
 def build_installer(skip_build: bool = False) -> int:
     """用 Inno Setup 打包安装程序（setup 解包安装）。"""
     dist = ROOT / "dist" / "wjx-auto"
@@ -183,6 +206,8 @@ def main() -> int:
     parser.add_argument("--only-onefile", action="store_true", help="只构建单文件 exe")
     parser.add_argument("--setup", action="store_true", help="构建 onedir 后再打安装包")
     parser.add_argument("--only-setup", action="store_true", help="只打安装包（跳过 exe 构建）")
+    parser.add_argument("--portable", action="store_true",
+                        help="额外把绿色版目录压成 dist/setup/*-portable.zip")
     parser.add_argument("--clean", action="store_true", help="先清空 build/ 与 dist/")
     parser.add_argument("--skip-selftest", action="store_true", help="打包前不跑自测")
     parser.add_argument("--no-driver", action="store_true",
@@ -199,6 +224,9 @@ def main() -> int:
 
     if args.only_setup:
         code = build_installer(skip_build=True)
+        if args.portable:
+            print("\n正在打包绿色版压缩包 …")
+            build_portable_zip()
         print(f"\n耗时 {time.time() - started:.0f} 秒")
         return code
 
@@ -227,6 +255,10 @@ def main() -> int:
         code = build_installer()
         if code != 0:
             return code
+
+    if args.portable:
+        print("\n正在打包绿色版压缩包 …")
+        build_portable_zip()
 
     print(f"耗时 {time.time() - started:.0f} 秒")
     return 0

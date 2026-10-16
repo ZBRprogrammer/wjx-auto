@@ -421,6 +421,7 @@ wjx-auto/
 
 ```bat
 python tools\build_exe.py --setup        :: 构建 onedir + 生成安装包（推荐）
+python tools\build_exe.py --setup --portable   :: 再压一个绿色版 zip
 python tools\build_exe.py                :: 只构建绿色版目录
 python tools\build_exe.py --only-setup   :: 只重新生成安装包（用已有 dist/wjx-auto）
 python tools\build_exe.py --clean        :: 先清空 build\ 与 dist\
@@ -430,13 +431,21 @@ python tools\build_exe.py --no-driver    :: 不内置浏览器驱动（体积小
 产物：
 
 ```
-dist/setup/wjx-auto-<版本>-setup.exe    安装包（约 36 MB；解包后约 116 MB）
-dist/wjx-auto/                          绿色版目录（免安装，整个拷走即可）
-  wjx-auto-gui.exe                      图形界面，双击即用（无控制台窗口）
-  wjx-auto.exe                          命令行版（selftest / probe / fill / autostart / daemon / bank …）
-  使用说明.txt                           使用者文档
-  _internal/                            Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
+dist/setup/wjx-auto-<版本>-setup.exe        安装包（约 36 MB；解包后约 116 MB）
+dist/setup/wjx-auto-<版本>-portable.zip     绿色版压缩包（约 57 MB，解压即用）
+dist/wjx-auto/                              绿色版目录（免安装，整个拷走即可）
+  wjx-auto-gui.exe                          图形界面，双击即用（无控制台窗口）
+  wjx-auto.exe                              命令行版（selftest / probe / fill / autostart / daemon / bank …）
+  使用说明.txt                               使用者文档
+  _internal/                                Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
 ```
+
+> **装不上时的排查顺序**（真实案例）：
+> 若安装报错里的路径含 `\AppData\Local\Temp\is-XXXX.tmp`，说明**解包用的临时目录被拦**了
+> （受控文件夹访问 / 360 / 火绒 / 腾讯电脑管家等），安装程序还没开始装就被挡住，连日志都写不出。
+> 此时安装包会**提前弹窗说明原因**并给出选择：生成目录诊断报告，或改用绿色版。
+> 绿色版完全不需要临时目录，推荐直接解压 `*-portable.zip` 使用。
+> 运行 `wjx-auto-<版本>-setup.exe /TESTDIRS` 可导出各目录可写性报告，便于定位。
 
 ### 安装包行为
 
