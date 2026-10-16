@@ -41,7 +41,7 @@ A 提交成功后 B 自动变为「已跳过」；若把 A 改成会触发"人�
 
 | 需求 | 实现 |
 | --- | --- |
-| 到时间自动填写内容并提交 | 调度器每秒巡检，到点用配置的默认内容填写并点击提交（`wjx/scheduler.py`） |
+| 到时间自动填写内容并提交 | 调度器按 `poll_seconds` 巡检，到点用配置的默认内容填写并点击提交（`wjx/scheduler.py`） |
 | GUI 添加/删除/更改任务（时间、网址） | 主界面工具栏 + 任务编辑对话框（`wjx/gui.py`） |
 | GUI 添加/删除/更改默认填写内容 | 编辑对话框「默认填写内容」页，支持键值行与 JSON 两种写法，带格式检查 |
 | 依据条件启动任务 | 条件表达式引擎，函数：`status/result/attempts/submitted/enabled/name/url/group`，支持 `and or not ( ) > < ==`（`wjx/rules.py`） |
@@ -53,6 +53,7 @@ A 提交成功后 B 自动变为「已跳过」；若把 A 改成会触发"人�
 | 后台静默运行、低内存 | 单进程 tkinter + 守护线程；可最小化到系统托盘；selenium 只在真正需要时才导入；日志自动轮转 |
 | 开始前 5 分钟弹窗/提示音提醒 | Windows 通知中心 toast（失败退化为置顶消息框）+ `winsound` 提示音 + 任务栏闪烁 |
 | 终端/后台提交时提前取页面内容 | `prepare_minutes` 预打开 + `main.py daemon` 后台模式；条件规则里可用 `result()`/`attempts()` 处理重试 |
+| 稳定性 | 35 项内置自测覆盖规则引擎、答案映射、提交判定、提醒时机、条件/优先级、过期保护、配置读写(含 BOM) |
 
 ---
 
@@ -111,6 +112,7 @@ enabled('问卷A') and group('B') == '今日问卷'
 ```bat
 python main.py mock                 :: 默认 http://127.0.0.1:8765
 python main.py mock --full-rate 0.4 :: 让问卷B 有 40% 概率返回"填写人数过多"
+python main.py mock-stop            :: 停止由自动拉起功能启动的模拟服务
 ```
 
 * 浏览器直接打开 <http://127.0.0.1:8765/vm/A.aspx> 就能手动填写并看到 mock 记录到的答案。
@@ -119,6 +121,15 @@ python main.py mock --full-rate 0.4 :: 让问卷B 有 40% 概率返回"填写人
   * `http://127.0.0.1:8765/vm/A.aspx?force=fail` → 必填校验失败，停留原页
   * `http://127.0.0.1:8765/vm/A.aspx?force=ok` → 一定成功并跳转到 `join/A_done.aspx`
 * 调试接口：`/stats`（所有提交记录）、`/quota/A`（已收份数）、`POST /reset`（重置）。
+* GUI / `daemon` / `run` / `demo` 若发现本地 mock 服务没在运行，会自动以独立进程拉起
+  （PID 记在 `run/mock.pid`，`mock-stop` 可停止）。`demo` 使用独立端口 8799 与临时配置，
+  **不会读写你的 `data/tasks.json`**。
+
+### 后端会按网址自动路由
+
+即使设置里是 `mock` 后端，只要任务网址不是本机模拟地址（例如 `https://v.wjx.cn/vm/xxx.aspx`），
+程序会自动改用真实浏览器后端，而不是把真实问卷发给模拟服务。此时若环境没有 selenium，
+任务会以「填写后端异常」结束，并在日志/结果里给出安装说明——这条路径已在自测中覆盖。
 
 ---
 
@@ -157,7 +168,8 @@ python main.py add --name 问卷C --url https://v.wjx.cn/vm/xxx.aspx --at "2026-
 q2 = 默认文本"
 python main.py run --task 问卷C                      :: 立即执行一次并输出 JSON 判定结果
 python main.py remove --task 问卷C
-python main.py selftest / demo                       :: 自测 / 场景演示
+python main.py mock-stop                             :: 停止自动拉起的模拟服务
+python main.py selftest / demo                       :: 自测 / 场景演示（demo 完全隔离，不动你的配置）
 ```
 
 `--scale` 只用于自测加速时钟，正式使用请不要开启。

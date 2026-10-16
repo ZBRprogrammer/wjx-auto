@@ -54,7 +54,7 @@ class Scheduler:
         self.clock_scale: float = 1.0           # >1 表示加速（仅用于自测）
         self._t0 = time.time()
         self._t0_virtual = datetime.now()
-        self._driver = None
+        self._drivers: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -87,12 +87,18 @@ class Scheduler:
     # 时间与事件
     # ------------------------------------------------------------------ #
     def now(self) -> datetime:
+        """调度判定用的"当前时间"。clock_scale>1 时返回加速时间（仅自测用）。"""
         if self.clock_scale > 1.0:
             return self._t0_virtual + timedelta(seconds=(time.time() - self._t0) * self.clock_scale)
         return datetime.now()
 
+    @staticmethod
+    def wall_clock() -> datetime:
+        """真实时间：用于事件与执行记录的时间戳，保证日志前后一致。"""
+        return datetime.now()
+
     def _emit(self, kind: str, task: Optional[Task] = None, **extra: Any) -> None:
-        payload = {"kind": kind, "time": self.now().strftime("%H:%M:%S")}
+        payload = {"kind": kind, "time": self.wall_clock().strftime("%H:%M:%S")}
         if task is not None:
             payload.update({"task_id": task.id, "task_name": task.name})
         payload.update(extra)
@@ -211,7 +217,7 @@ class Scheduler:
         if entry and entry[2] == key:
             return
         try:
-            driver = self._get_driver()
+            driver = self._get_driver(task)
             handle = driver.prepare(task)
             self._prepared[task.id] = (driver, handle, key)
             log.info("已提前打开页面：%s", task.url)
@@ -299,7 +305,7 @@ class Scheduler:
         task.set_status(TaskStatus.RUNNING)
         self._emit("task_start", task, reason=reason)
         log.info("开始执行：%s（%s）", task.name, reason or "到点执行")
-        rec = RunRecord(started_at=self.now().strftime("%Y-%m-%d %H:%M:%S"))
+        rec = RunRecord(started_at=self.wall_clock().strftime("%Y-%m-%d %H:%M:%S"))
 
         if task.requires_confirm_after_reminder and not task.answers:
             rec.result = RunResult.UNKNOWN.value
@@ -310,7 +316,7 @@ class Scheduler:
         prepared = self._take_prepared(task)
         outcome = FillOutcome(result=RunResult.UNKNOWN.value)
         try:
-            driver = self._get_driver()
+            driver = self._get_driver(task)
             outcome = driver.submit(task, prepared)
         except DriverUnavailable as exc:
             rec.result = RunResult.DRIVER_ERROR.value
@@ -339,7 +345,7 @@ class Scheduler:
         rec.url_after = outcome.url_after
         rec.dialog_text = outcome.dialog_text
         rec.message = outcome.message
-        rec.finished_at = self.now().strftime("%Y-%m-%d %H:%M:%S")
+        rec.finished_at = self.wall_clock().strftime("%Y-%m-%d %H:%M:%S")
         if outcome.unfilled:
             rec.message = f"{rec.message}｜未填: {', '.join(outcome.unfilled[:5])}"
 
@@ -412,13 +418,17 @@ class Scheduler:
     # ------------------------------------------------------------------ #
     # 驱动 / 持久化 / 上下文
     # ------------------------------------------------------------------ #
-    def _get_driver(self):
-        if self._driver is None:
-            self._driver = create_driver(self.cfg.settings)
-        return self._driver
+    def _get_driver(self, task: Optional[Task] = None):
+        """按任务网址选择后端并缓存（mock 与 selenium 可并存）。"""
+        from .drivers import resolve_backend
+
+        key = resolve_backend(self.cfg.settings, task.url if task else None)
+        if key not in self._drivers:
+            self._drivers[key] = create_driver(self.cfg.settings, task.url if task else None)
+        return self._drivers[key]
 
     def reset_driver(self) -> None:
-        self._driver = None
+        self._drivers.clear()
 
     def _persist(self) -> None:
         try:

@@ -34,7 +34,7 @@ if sys.stdout is not None:
 from wjx import config as config_mod
 from wjx import logging_setup, manualtest, notify, paths
 from wjx import rules
-from wjx.models import AppConfig, RunRecord, STATUS_TEXT, Task, TaskStatus
+from wjx.models import AppConfig, RESULT_TEXT, RunRecord, STATUS_TEXT, Task, TaskStatus
 from wjx.scheduler import Scheduler
 
 
@@ -117,10 +117,13 @@ def cmd_remove(args) -> int:
 
 def cmd_run(args) -> int:
     cfg = _load(args)
+    _ensure_mock_server(cfg)      # mock 后端：服务没起就自动拉起
     task = _find_or_die(cfg, args.task)
     rec = manualtest.fill_once(cfg, task)
     config_mod.save_config(cfg, getattr(args, "config", None))
     print(json.dumps(rec.to_dict(), ensure_ascii=False, indent=2))
+    if rec.result != "success":
+        print(f"\n判定: {RESULT_TEXT.get(rec.result_enum, rec.result)}", file=sys.stderr)
     return 0 if rec.result == "success" else 1
 
 
@@ -173,19 +176,56 @@ def cmd_daemon(args) -> int:
     return 0
 
 
+def cmd_mock_stop(args) -> int:
+    """停止由自动拉起功能启动的模拟问卷服务（PID 记录在 run/mock.pid）。"""
+    pid_file = paths.RUN_DIR / "mock.pid"
+    if not pid_file.exists():
+        print("没有记录的模拟问卷服务进程")
+        return 0
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError) as exc:
+        print(f"读取 PID 失败: {exc}")
+        return 1
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       capture_output=True, timeout=10,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        print(f"已停止模拟问卷服务 (pid={pid})")
+    except Exception as exc:
+        print(f"停止失败（可手动结束 PID {pid}）: {exc}")
+    finally:
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+    return 0
+
+
 def cmd_demo(args) -> int:
-    """一键演示：A 先执行成功后 B 自动跳过；A 失败则 B 继续。"""
+    """一键演示：A 先执行成功后 B 自动跳过；A 失败则 B 继续。
+
+    全程在独立的配置与端口上运行（data/demo-*.json + 8799），
+    不会读写你自己的任务配置，也不影响正在运行的模拟服务。
+    """
     from wjx import mockserver
 
+    demo_port = 8799
+    demo_base = f"http://127.0.0.1:{demo_port}"
     cfg = AppConfig()
     cfg.settings.backend = "mock"
-    base = cfg.settings.mock_base_url.rstrip("/")
+    cfg.settings.mock_base_url = demo_base
 
     if not manualtest.check_mock_server(cfg.settings):
-        print("未检测到模拟问卷服务，正在自动启动 …")
-        if not _ensure_mock_server(cfg):
-            print("模拟问卷服务启动失败，请手动运行: python main.py mock")
+        print("未检测到演示用的模拟问卷服务，正在自动启动 …")
+        if not _ensure_mock_server(cfg, port=demo_port, pid_name="mock-demo.pid"):
+            print("模拟问卷服务启动失败，请手动运行: python main.py mock --port 8799")
             return 2
+
+    base = demo_base
+    cfg2 = AppConfig()
+    cfg2.settings.backend = "mock"
+    cfg2.settings.mock_base_url = demo_base
 
     a = Task(name="问卷A", url=f"{base}/vm/A.aspx", start_at=_past(2),
              answers={"q1": "1", "q2": "A的默认填写内容"}, group="今日问卷", priority=10,
@@ -208,8 +248,6 @@ def cmd_demo(args) -> int:
     print("=" * 74)
     print("场景二：A 提交失败（人数已满）→ B 条件成立，应继续填写 B")
     print("=" * 74)
-    cfg2 = AppConfig()
-    cfg2.settings.backend = "mock"
     a2 = Task(name="问卷A", url=f"{base}/vm/A.aspx?force=full", start_at=_past(2),
               answers={"q1": "1", "q2": "A的默认填写内容"}, group="今日问卷", priority=10,
               retry_on_full=0)
@@ -279,29 +317,40 @@ def _soon(minutes: int) -> str:
     return (datetime.now() + timedelta(minutes=minutes)).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _ensure_mock_server(cfg: AppConfig) -> bool:
-    """GUI/daemon 启动时若模拟服务未运行则自动拉起（仅当配置指向本地 mock 地址）。"""
+def _ensure_mock_server(cfg: AppConfig, port: Optional[int] = None,
+                        pid_name: str = "mock.pid") -> bool:
+    """GUI/daemon/run/demo 启动时若模拟服务未运行则自动拉起（仅当配置指向本地 mock 地址）。
+
+    子进程以分离会话方式启动并写 PID 文件，避免随调用方退出而结束。
+    """
     base = cfg.settings.mock_base_url or ""
     if "127.0.0.1" not in base and "localhost" not in base:
         return False
     if manualtest.check_mock_server(cfg.settings):
         return True
     try:
-        port = 8765
-        if ":" in base.rsplit("/", 1)[-1]:
-            try:
-                port = int(base.rsplit(":", 1)[-1].strip("/"))
-            except ValueError:
-                pass
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(
+        if port is None:
+            port = 8765
+            tail = base.rsplit("/", 1)[-1]
+            if ":" in tail:
+                try:
+                    port = int(tail.rsplit(":", 1)[-1].strip("/"))
+                except ValueError:
+                    port = 8765
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        proc = subprocess.Popen(
             [sys.executable, str(paths.ROOT / "main.py"), "mock", "--port", str(port)],
             cwd=str(paths.ROOT),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
         )
-        for _ in range(20):
+        try:
+            (paths.RUN_DIR / pid_name).write_text(str(proc.pid), encoding="utf-8")
+        except OSError:
+            pass
+        for _ in range(24):
             time.sleep(0.25)
             if manualtest.check_mock_server(cfg.settings):
                 return True
@@ -315,22 +364,26 @@ def build_parser() -> argparse.ArgumentParser:
         prog="wjx-auto", description="问卷星定时自动填写助手",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__,
     )
+    # --config 前后位置都支持：default=SUPPRESS 让子解析器不覆盖已有值
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", type=Path, default=argparse.SUPPRESS,
+                        help="配置文件路径（默认 data/tasks.json）")
     parser.add_argument("--config", type=Path, default=None, help="配置文件路径（默认 data/tasks.json）")
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("gui", help="打开图形界面")
+    p = sub.add_parser("gui", help="打开图形界面", parents=[common])
     p.set_defaults(func=cmd_gui)
 
-    p = sub.add_parser("mock", help="启动本地模拟问卷服务")
+    p = sub.add_parser("mock", help="启动本地模拟问卷服务", parents=[common])
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--full-rate", type=float, default=None, help="问卷B 出现'人数已满'的概率（0~1）")
     p.set_defaults(func=cmd_mock)
 
-    p = sub.add_parser("list", help="列出任务")
+    p = sub.add_parser("list", help="列出任务", parents=[common])
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("add", help="添加任务")
+    p = sub.add_parser("add", help="添加任务", parents=[common])
     p.add_argument("--name", required=True)
     p.add_argument("--url", required=True)
     p.add_argument("--at", default=None, help="YYYY-MM-DD HH:MM:SS")
@@ -342,27 +395,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prepare", type=int, default=5)
     p.set_defaults(func=cmd_add)
 
-    p = sub.add_parser("remove", help="删除任务")
+    p = sub.add_parser("remove", help="删除任务", parents=[common])
     p.add_argument("--task", required=True, help="任务名称或 id")
     p.set_defaults(func=cmd_remove)
 
-    p = sub.add_parser("run", help="立即执行一次并输出判定结果")
+    p = sub.add_parser("run", help="立即执行一次并输出判定结果", parents=[common])
     p.add_argument("--task", required=True)
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("check-rule", help="校验条件表达式")
+    p = sub.add_parser("check-rule", help="校验条件表达式", parents=[common])
     p.add_argument("expr")
     p.set_defaults(func=cmd_check_rule)
 
-    p = sub.add_parser("daemon", help="后台静默运行调度器")
+    p = sub.add_parser("daemon", help="后台静默运行调度器", parents=[common])
     p.add_argument("--seconds", type=int, default=0, help="运行多少秒后退出（0=一直运行）")
     p.add_argument("--scale", type=float, default=1.0, help="加速时钟（仅用于自测）")
     p.set_defaults(func=cmd_daemon)
 
-    p = sub.add_parser("demo", help="一键演示 A/B 条件与优先级场景")
+    p = sub.add_parser("demo", help="一键演示 A/B 条件与优先级场景", parents=[common])
     p.set_defaults(func=cmd_demo)
 
-    p = sub.add_parser("selftest", help="运行内置自测")
+    p = sub.add_parser("mock-stop", help="停止自动拉起的模拟问卷服务", parents=[common])
+    p.set_defaults(func=cmd_mock_stop)
+
+    p = sub.add_parser("selftest", help="运行内置自测", parents=[common])
     p.set_defaults(func=cmd_selftest)
 
     return parser

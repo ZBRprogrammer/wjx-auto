@@ -134,6 +134,54 @@ def test_reminder() -> None:
         sched_mod.notify.alert, sched_mod.notify.info = original_alert, original_info
 
 
+def test_config_io() -> None:
+    """配置读写回归：UTF-8 BOM、答案文本解析、原子写与备份。"""
+    import json
+    import shutil
+    from pathlib import Path
+
+    from . import config as config_mod
+    from .paths import RUN_DIR
+
+    # 用项目内目录，避免系统临时目录权限限制（tempfile 会 chmod，沙箱下可能失败）
+    tmp_root = RUN_DIR / "selftest-tmp"
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    try:
+        _config_io_checks(tmp_root, json, config_mod, Path)
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def _config_io_checks(tmp_root, json, config_mod, Path) -> None:
+    path = Path(tmp_root) / "tasks.json"
+    # 模拟记事本 / PowerShell 写出的带 BOM JSON
+    payload = {
+        "version": 1,
+        "settings": {"backend": "mock"},
+        "tasks": [{"id": "x1", "name": "带BOM的任务", "url": "http://x/1", "answer_text": "q1 = 1\nq2 = 文本"}],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8-sig")
+    cfg = config_mod.load_config(path)
+    _check("带 BOM 的配置文件可正常读取", len(cfg.tasks) == 1 and cfg.tasks[0].name == "带BOM的任务",
+           f"tasks={len(cfg.tasks)}")
+    _check("answer_text 解析为答案字典",
+           cfg.tasks[0].answers.get("q1") == "1" and cfg.tasks[0].answers.get("q2") == "文本",
+           str(cfg.tasks[0].answers))
+
+    # 原子写 + 备份 + 往返一致
+    cfg.tasks[0].priority = 42
+    config_mod.save_config(cfg, path)
+    cfg2 = config_mod.load_config(path)
+    _check("保存后往返一致", cfg2.tasks[0].priority == 42, str(cfg2.tasks[0].priority))
+
+    # 损坏的配置文件不应导致崩溃（回退到 .bak 或空任务列表）
+    path.write_text("{ 这不是 JSON", encoding="utf-8")
+    cfg3 = config_mod.load_config(path)
+    _check("损坏配置不崩溃且回退到备份", isinstance(cfg3.tasks, list), f"tasks={len(cfg3.tasks)}")
+
+
 # --------------------------------------------------------------------------- #
 def test_backend_and_scheduler() -> None:
     httpd = mockserver.create_server(port=8791)
@@ -228,7 +276,6 @@ def test_backend_and_scheduler() -> None:
         s4._tick()
         time.sleep(1.2)
         s4._tick()
-        # 优先级：同组同时到点，只跑优先级高的（低优先仅可能处于"待定/跳过"）
         _check("同组内只启动最高优先级",
                hi.status in (TaskStatus.SUCCESS.value, TaskStatus.RUNNING.value)
                and lo.attempts == 0 and lo.status != TaskStatus.SUCCESS.value,
@@ -294,6 +341,7 @@ def run() -> int:
     test_answers()
     test_classify()
     test_reminder()
+    test_config_io()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)

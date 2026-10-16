@@ -4,22 +4,25 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .drivers import create_driver
+from .drivers import DriverUnavailable, create_driver
 from .models import AppConfig, RunRecord, Task
 from .scheduler import Scheduler
 
 
 def fill_once(cfg: AppConfig, task: Task, record: bool = True) -> RunRecord:
-    """同步执行一次"填写→提交→判定"，返回执行记录。"""
-    driver = create_driver(cfg.settings)
+    """同步执行一次"填写→提交→判定"，返回执行记录（异常也转成记录，不抛出）。"""
     rec = RunRecord(started_at=_now())
     try:
+        driver = create_driver(cfg.settings, task.url)
         outcome = driver.submit(task, None)
         rec.result = outcome.result
         rec.url_before = outcome.url_before
         rec.url_after = outcome.url_after
         rec.dialog_text = outcome.dialog_text
         rec.message = outcome.message
+    except DriverUnavailable as exc:
+        rec.result = "driver_error"
+        rec.message = str(exc)
     except Exception as exc:
         rec.result = "driver_error"
         rec.message = f"{type(exc).__name__}: {exc}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -39,15 +40,23 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         cfg = AppConfig()
         cfg.tasks = default_tasks(cfg.settings)
         return cfg
+    raw = None
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        # utf-8-sig: 容忍记事本/PowerShell 写出的 BOM
+        with open(path, "r", encoding="utf-8-sig") as fh:
             raw = json.load(fh)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
         backup = path.with_suffix(path.suffix + ".bak")
         if backup.exists():
-            with open(backup, "r", encoding="utf-8") as fh:
-                raw = json.load(fh)
-        else:
+            try:
+                with open(backup, "r", encoding="utf-8-sig") as fh:
+                    raw = json.load(fh)
+                logging.getLogger("wjx").warning("配置文件损坏，已回退到备份: %s", backup)
+            except (json.JSONDecodeError, OSError):
+                raw = None
+        if raw is None:
+            # 不静默清空任务：让调用方看到问题，但保证程序仍能启动
+            logging.getLogger("wjx").error("配置文件无法解析，将以空任务列表启动: %s (%s)", path, exc)
             return AppConfig()
     cfg = AppConfig.from_dict(raw)
     for task in cfg.tasks:
