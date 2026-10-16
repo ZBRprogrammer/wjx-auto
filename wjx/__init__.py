@@ -11,5 +11,5 @@
     mockserver 本地模拟问卷（离线 demo 用）
 """
 
-__version__ = "0.1.0"
+__version__ = "0.5.2"
 APP_NAME = "wjx-auto"

@@ -966,6 +966,10 @@ class MainWindow(tk.Tk):
         self.after(500, self._pump)
         self.after(1000, self._refresh)
         self._setup_tray()
+        # 开机自启（--minimized）：窗口建好后直接收进托盘，不打扰用户
+        if self.cfg.settings.start_minimized and self._tray is not None:
+            self.after(600, self.hide_to_tray)
+            self.cfg.settings.start_minimized = False   # 只在本次启动生效
 
     # ------------------------------------------------------------------ #
     # 界面

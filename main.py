@@ -442,6 +442,9 @@ def cmd_learn(args) -> int:
 def cmd_gui(args) -> int:
     cfg = _load(args)
     _ensure_mock_server(cfg)
+    if getattr(args, "minimized", False):
+        # 开机自启：启动后直接最小化到托盘，不弹窗打扰
+        cfg.settings.start_minimized = True
     from wjx.gui import run_gui
 
     return run_gui(cfg, getattr(args, "config", None))
@@ -761,6 +764,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     p = sub.add_parser("gui", help="打开图形界面", parents=[common])
+    p.add_argument("--minimized", action="store_true",
+                   help="启动后直接最小化到托盘（安装包的开机自启用这个参数）")
     p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("mock", help="启动本地模拟问卷服务", parents=[common])

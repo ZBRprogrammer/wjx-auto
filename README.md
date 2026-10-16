@@ -415,66 +415,79 @@ wjx-auto/
 
 ---
 
-## 10. 打包成可执行文件
+## 10. 打包成可执行文件 / 安装包
+
+推荐用**安装包**分发（setup 解包安装，不做单文件运行时解包）：
 
 ```bat
-python tools\build_exe.py                :: onedir（推荐分发）
-python tools\build_exe.py --onefile      :: 额外产出两个单文件 exe
+python tools\build_exe.py --setup        :: 构建 onedir + 生成安装包（推荐）
+python tools\build_exe.py                :: 只构建绿色版目录
+python tools\build_exe.py --only-setup   :: 只重新生成安装包（用已有 dist/wjx-auto）
 python tools\build_exe.py --clean        :: 先清空 build\ 与 dist\
+python tools\build_exe.py --no-driver    :: 不内置浏览器驱动（体积小约 23MB）
 ```
 
 产物：
 
 ```
-dist/wjx-auto/                  （约 116 MB，推荐）
-  wjx-auto-gui.exe              图形界面，双击即用（无控制台窗口）
-  wjx-auto.exe                  命令行版（selftest / probe / fill / autostart / daemon / bank …）
-  使用说明.txt                   给使用者的快速上手 + 常见问题
-  _internal/                    Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
-
-dist/wjx-auto-onefile.exe       （约 51 MB，便携单文件，双击即用）
-dist/wjx-auto-cli-onefile.exe   （约 51 MB，便携单文件，命令行版）
+dist/setup/wjx-auto-<版本>-setup.exe    安装包（约 36 MB；解包后约 116 MB）
+dist/wjx-auto/                          绿色版目录（免安装，整个拷走即可）
+  wjx-auto-gui.exe                      图形界面，双击即用（无控制台窗口）
+  wjx-auto.exe                          命令行版（selftest / probe / fill / autostart / daemon / bank …）
+  使用说明.txt                           使用者文档
+  _internal/                            Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
 ```
 
-单文件版每次运行会把资源解包到系统临时目录，启动略慢；**若目标机器的系统临时目录
-不可写**（例如某些受控环境），请改用 onedir 版。命令行操作（selftest/probe/fill…）
-建议用 `wjx-auto.exe` 或 `wjx-auto-cli-onefile.exe`（带控制台，能看到输出）。
+### 安装包行为
 
-分发方式：**整个 `dist/wjx-auto` 文件夹**拷给别人，双击 `wjx-auto-gui.exe` 即可。
-运行后会在 exe 同级生成 `data\`（任务/答案库）、`logs\`、`run\`；配置跟着文件夹走，
-升级时只替换 exe 与 `_internal\`，`data\` 不会被覆盖。
+| 项目 | 说明 |
+| --- | --- |
+| 安装位置 | `%LOCALAPPDATA%\Programs\wjx-auto`（**按用户安装，不需要管理员权限**）；向导里可改路径 |
+| 安装方式 | Inno Setup 的 LZMA2 **解包安装**（不是单文件每次启动解包），启动快、不依赖系统临时目录 |
+| 快捷方式 | 开始菜单：主程序 / 命令行 / 环境自检 / 使用说明 / 卸载；可选桌面图标与「预演本卷」 |
+| 可选任务 | ① 桌面快捷方式 ② **开机自动后台运行**（写 HKCU Run 项，带 `--minimized`，启动即收进托盘） |
+| 数据位置 | `data\`（任务 + 答案库）在安装目录下，**升级与卸载都不覆盖/不删除** |
+| 卸载 | 从"应用和功能"或开始菜单卸载；只清理程序、`logs\`、`run\`、`.selenium-cache\`，保留 `data\` |
+| 语言 | 简体中文（`packaging/languages/ChineseSimplified.isl`）+ 英文 |
 
 打包要点（`packaging/` 目录）：
 
 | 文件 | 作用 |
 | --- | --- |
 | `wjx-auto.spec` | 一次构建两个 exe（GUI 无控制台 + CLI 有控制台），共用同一份依赖，体积几乎不翻倍 |
-| `wjx-auto-onefile.spec` | 单文件便携版（同时产出 GUI 版与命令行版） |
+| `wjx-auto.iss` | Inno Setup 脚本：按用户安装、可选开机自启、卸载保留数据 |
 | `common.py` | 收集规则：只带 selenium 及其运行依赖；排除 numpy/pandas/matplotlib，省下上百 MB |
-| `使用说明.txt` | 随包分发的用户文档 |
+| `languages/ChineseSimplified.isl` | 安装向导的简体中文语言文件 |
+| `使用说明.txt` / `空数据目录说明.txt` | 随包分发的用户文档 |
 
 其它实现细节：
 
 * **路径**：`wjx/paths.py` 检测 `sys.frozen`，只读资源取 `_MEIPASS`，可写数据取 exe 同级目录
   （若 exe 目录不可写，如装在 `Program Files`，自动回落到 `%LOCALAPPDATA%\wjx-auto`）。
-* **HTML 解析**：改用项目内置的 `wjx/htmlparse.py`（纯标准库），因此不必打包
+* **HTML 解析**：用项目内置的 `wjx/htmlparse.py`（纯标准库），因此不必打包
   beautifulsoup4 + lxml（省约 30 MB）；`probe --static` 在打包版里照常可用。
 * **模拟问卷服务**：打包后没有 `main.py` 可执行，改为在本进程内用线程启动
   （`mockserver.ensure_running`），GUI / demo / run 都能正常拉起。
 * **驱动**：只把 `drivers/*.exe` 打进 `_internal/drivers/`（跳过 11 MB 的 zip）；
-  用户也可把匹配自己浏览器版本的驱动放到 exe 同级 `drivers\`，查找顺序见
-  `paths.find_bundled_driver()`。
+  用户也可把匹配自己浏览器版本的驱动放到安装目录的 `drivers\`。
 * **自检**：`wjx-auto.exe check-env` 报告运行方式、可写目录、tkinter、内置解析器、
   selenium、浏览器与驱动、网络、答案库与任务数量 —— 换机器后先跑它就够定位问题。
 
-实测（打包版，非源码）：
+已实测（打包版，非源码）：
 
 ```
 wjx-auto.exe selftest   → 99 项全部通过
 wjx-auto.exe check-env  → 环境就绪 ✔（selenium 4.51 + 内置 Edge 驱动）
 wjx-auto.exe probe --url https://v.wjx.cn/vm/xx.aspx  → 真实无头 Edge 读出 5 道题
-wjx-auto-gui.exe        → 窗口正常打开，且不会为模拟问卷误启真实浏览器
+wjx-auto.exe demo       → 两个场景通过
+从任意安装目录运行       → 正确读取该目录下 data\，任务列表正确
+模拟卸载                 → 按 [UninstallDelete] 清理后 data\ 完整保留
 ```
+
+安装包用 Inno Setup 编译（本机：`winget install --id JRSoftware.InnoSetup --scope user`）。
+注意：当前沙箱会拒绝**安装器解包出的子进程**写 `HKCU\...\Uninstall` 注册表项，所以这里做到
+"编译成功 + 解包内容与绿色版逐字节一致 + 安装后程序可用 + 卸载保留数据"；
+请在正常桌面环境双击 `wjx-auto-0.5.2-setup.exe` 走一遍向导，确认快捷方式与开机自启。
 
 ---
 

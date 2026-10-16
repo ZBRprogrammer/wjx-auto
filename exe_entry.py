@@ -37,11 +37,27 @@ def _bootstrap() -> None:
                 pass
 
 
+def _apply_startup_flags(argv: list) -> list:
+    """兼容安装包写入的启动参数。
+
+    * ``--minimized``（开机自启用）：GUI 启动后直接最小化到托盘，不打扰用户；
+    * 其余参数原样透传。
+    """
+    if "--minimized" not in argv:
+        return argv
+    argv = [a for a in argv if a != "--minimized"]
+    if not argv:
+        argv = ["gui"]
+    if argv and argv[0] == "gui" and "--minimized" not in argv:
+        argv.append("--minimized")
+    return argv
+
+
 def main() -> int:
     _bootstrap()
     from main import main as cli_main
 
-    argv = sys.argv[1:]
+    argv = _apply_startup_flags(sys.argv[1:])
     if not argv:
         # 双击运行：进入图形界面
         argv = ["gui"]
