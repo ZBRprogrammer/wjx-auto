@@ -22,7 +22,10 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:  # pragma: no cover
+    from wjx.answers import AnswerBank
 
 if sys.stdout is not None:
     try:
@@ -40,8 +43,8 @@ from wjx.scheduler import Scheduler
 
 # --------------------------------------------------------------------------- #
 def _load(args) -> AppConfig:
+    paths.setup_environment()          # vendor/ 依赖、selenium 缓存目录
     cfg = config_mod.load_config(getattr(args, "config", None))
-    paths.ensure_dirs()
     return cfg
 
 
@@ -51,6 +54,198 @@ def _find_or_die(cfg: AppConfig, key: str) -> Task:
         print(f"未找到任务: {key}", file=sys.stderr)
         sys.exit(2)
     return task
+
+
+def _bank(args) -> "AnswerBank":
+    from wjx.answers import AnswerBank
+
+    return AnswerBank.load()
+
+
+# --------------------------------------------------------------------------- #
+# 题目 / 答案库相关命令
+# --------------------------------------------------------------------------- #
+def cmd_probe(args) -> int:
+    """读取问卷题目并在答案库中检索答案（不提交）。"""
+    cfg = _load(args)
+    _ensure_mock_server(cfg)
+    from wjx import autorun
+
+    bank = _bank(args)
+    res = autorun.probe_questions(cfg, args.url, prefer_browser=not args.static, bank=bank)
+    print(res.report(show_options=not args.brief))
+    if args.json:
+        print()
+        print(json.dumps({
+            "url": res.url, "source": res.source, "error": res.error,
+            "questions": [dict(q.to_dict(), answer=m.answer, match=m.describe(),
+                               note=m.note)
+                          for q, m in zip(res.questions, res.matches)],
+        }, ensure_ascii=False, indent=2))
+    return 0 if res.ok and not res.unresolved else (1 if res.error else 0)
+
+
+def cmd_resolve(args) -> int:
+    """预演：显示将会填写的内容（不提交），等价于 GUI 的『预演』。"""
+    cfg = _load(args)
+    _ensure_mock_server(cfg)
+    from wjx import autorun
+
+    task = cfg.find(args.task) if args.task else None
+    url = args.url or (task.url if task else "")
+    if not url:
+        print("请通过 --url 或 --task 指定问卷", file=sys.stderr)
+        return 2
+    res = autorun.probe_questions(cfg, url, prefer_browser=not args.static, bank=_bank(args))
+    print(res.report(show_options=not args.brief))
+    print()
+    print("将提交的内容：")
+    for k, v in res.answers.items():
+        print(f"  {k} = {v!r}")
+    if res.unresolved:
+        print(f"  （{len(res.unresolved)} 道题未命中答案库："
+              + "; ".join(q.label[:20] for q in res.unresolved) + "）")
+    return 0 if res.ok else 1
+
+
+def cmd_fill(args) -> int:
+    """按题目内容检索答案库并真实填写提交。"""
+    cfg = _apply_cli_overrides(args, _load(args))
+    _ensure_mock_server(cfg)
+    from wjx import autorun
+
+    task = cfg.find(args.task) if args.task else None
+    url = args.url or (task.url if task else "")
+    if not url:
+        print("请通过 --url 或 --task 指定问卷", file=sys.stderr)
+        return 2
+    task = task or Task(name=args.task or "(临时任务)", url=url)
+    rec = autorun.run_task(cfg, task, bank=_bank(args), dry_run=args.dry_run)
+    if not args.url and args.task:
+        config_mod.save_config(cfg, getattr(args, "config", None))
+    print(json.dumps(rec.to_dict(), ensure_ascii=False, indent=2))
+    print(f"\n判定: {RESULT_TEXT.get(rec.result_enum, rec.result)}")
+    return 0 if rec.result == "success" else 1
+
+
+def cmd_bank(args) -> int:
+    """查看/维护答案库。"""
+    from wjx.answers import AnswerBank, CONFIDENCE_TEXT, load_pending
+
+    path = Path(args.bank_file) if getattr(args, "bank_file", None) else None
+    bank = AnswerBank.load(path) if path else _bank(args)
+    action = args.action
+
+    if action == "show":
+        data = bank.to_dict()
+        print(f"答案库: {bank.path}")
+        print(f"规则 {len(bank.rules)} 条，记住的答案 {len(bank.remembered)} 条\n")
+        for r in bank.rules:
+            flag = "" if r.enabled else "（已停用）"
+            print(f"  [{r.id}] {r.match:6} {r.pattern!r:34} -> {r.answer!r} {flag}")
+            if r.note:
+                print(f"         备注: {r.note}")
+        if bank.remembered:
+            print("\n记住的答案（按题目原文精确命中）：")
+            for q, e in list(bank.remembered.items())[:30]:
+                print(f"  {q[:44]!r:46} -> {e.answer!r}  (命中 {e.hits} 次)")
+        pending = load_pending()
+        if pending:
+            print(f"\n待补充答案的题目 {len(pending)} 道（data/pending_questions.json）：")
+            for it in pending[:20]:
+                print(f"  [{it.get('qtype','')}] {it.get('question','')}")
+                if it.get("options"):
+                    print("      选项: " + " / ".join(
+                        str(o.get("label")) for o in it["options"][:8]))
+        return 0
+
+    if action == "add":
+        rule = bank.add_rule(args.pattern, args.answer, match=args.match, note=args.note or "")
+        bank.save()
+        print(f"已添加规则 [{rule.id}] {rule.match} {rule.pattern!r} -> {rule.answer!r}")
+        return 0
+
+    if action == "remove":
+        ok = bank.remove_rule(args.pattern)
+        if ok:
+            bank.save()
+            print(f"已删除规则: {args.pattern}")
+            return 0
+        print(f"未找到规则: {args.pattern}", file=sys.stderr)
+        return 1
+
+    if action == "remember":
+        bank.remember(args.pattern, args.answer, source="cli")
+        bank.save()
+        print(f"已记住: {args.pattern[:40]!r} -> {args.answer!r}")
+        return 0
+
+    if action == "clear-pending":
+        from wjx.paths import DATA_DIR
+
+        p = DATA_DIR / "pending_questions.json"
+        if p.exists():
+            p.unlink()
+        print("已清空待补充题目列表")
+        return 0
+
+    print(f"未知操作: {action}", file=sys.stderr)
+    return 2
+
+
+def cmd_learn(args) -> int:
+    """交互式补答案：读取问卷题目，对未命中的题目逐个询问并写入答案库。"""
+    cfg = _load(args)
+    _ensure_mock_server(cfg)
+    from wjx import autorun
+    from wjx.answers import load_pending
+
+    bank = _bank(args)
+    questions: List[Any] = []
+    if args.url:
+        res = autorun.probe_questions(cfg, args.url, prefer_browser=not args.static, bank=bank)
+        if not res.ok:
+            print(res.report(), file=sys.stderr)
+            return 1
+        questions = res.questions
+    else:
+        pending = load_pending()
+        if not pending:
+            print("没有待补充的题目（可先用 --url 指定问卷）")
+            return 0
+        from wjx.questionnaire import Question
+
+        questions = [Question.from_dict({
+            "label": it.get("question", ""), "name": it.get("field", ""),
+            "qtype": it.get("qtype", ""), "options": it.get("options", []),
+        }) for it in pending]
+
+    added = 0
+    for q in questions:
+        m = bank.resolve(q.label, q.name, q.options, q.qtype)
+        if m.ok:
+            print(f"✔ 已有答案: {q.label[:40]} -> {m.answer!r}（{m.describe()}）")
+            continue
+        print(f"\n✘ 未命中: [{q.qtype}] {q.label}")
+        if q.options:
+            print("   选项: " + " / ".join(f"{o.get('label')}" for o in q.options[:10]))
+        try:
+            answer = input("   请输入答案（回车跳过，'expr' 表示按算式自动计算）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n已中断")
+            break
+        if not answer:
+            continue
+        if answer.lower() == "expr":
+            bank.add_rule(q.label, "", match="expr", pattern="arithmetic", note="用户标记为算术题")
+        else:
+            bank.add_rule(q.label, answer, match="text", note="learn 命令补充")
+        bank.remember(q.label, answer, source="learn")
+        added += 1
+    if added:
+        bank.save()
+        print(f"\n已写入 {added} 条答案到 {bank.path}")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -115,15 +310,30 @@ def cmd_remove(args) -> int:
     return 0
 
 
+def _apply_cli_overrides(args, cfg: AppConfig) -> AppConfig:
+    """把命令行开关映射到本次运行的设置（不写回配置文件）。"""
+    if getattr(args, "headed", False):
+        cfg.settings.headless = False
+    if getattr(args, "backend", None):
+        cfg.settings.backend = args.backend
+    if getattr(args, "browser", None):
+        cfg.settings.browser = args.browser
+    return cfg
+
+
 def cmd_run(args) -> int:
     cfg = _load(args)
     _ensure_mock_server(cfg)      # mock 后端：服务没起就自动拉起
     task = _find_or_die(cfg, args.task)
-    rec = manualtest.fill_once(cfg, task)
+    if args.manual:
+        rec = manualtest.fill_once(cfg, task)
+    else:
+        from wjx import autorun
+
+        rec = autorun.run_task(cfg, task, bank=_bank(args), dry_run=args.dry_run)
     config_mod.save_config(cfg, getattr(args, "config", None))
     print(json.dumps(rec.to_dict(), ensure_ascii=False, indent=2))
-    if rec.result != "success":
-        print(f"\n判定: {RESULT_TEXT.get(rec.result_enum, rec.result)}", file=sys.stderr)
+    print(f"\n判定: {RESULT_TEXT.get(rec.result_enum, rec.result)}", file=sys.stderr)
     return 0 if rec.result == "success" else 1
 
 
@@ -228,17 +438,18 @@ def cmd_demo(args) -> int:
     cfg2.settings.mock_base_url = demo_base
 
     a = Task(name="问卷A", url=f"{base}/vm/A.aspx", start_at=_past(2),
-             answers={"q1": "1", "q2": "A的默认填写内容"}, group="今日问卷", priority=10,
-             retry_on_full=0)
+             answers={"q1": "1", "q2": "A的默认填写内容", "q3": "7"},
+             group="今日问卷", priority=10, retry_on_full=0)
     b = Task(name="问卷B", url=f"{base}/vm/B.aspx", start_at=_past(1),
-             answers={"q1": "2", "q2": "B的默认填写内容"}, group="今日问卷", priority=5,
-             retry_on_full=0, start_rule="not submitted('问卷A')")
+             answers={"q1": "2", "q2": "B的默认填写内容", "q3": "7"},
+             group="今日问卷", priority=5, retry_on_full=0,
+             start_rule="not submitted('问卷A')")
     cfg.tasks = [a, b]
 
     print("=" * 74)
     print("场景一：A 成功 → B 应被跳过（互斥 + 条件）")
     print("=" * 74)
-    sched = Scheduler(cfg)
+    sched = Scheduler(cfg, config_path=False)
     _pump_until_idle(sched, [a, b], budget=6)
     print(f"  A 结果: {a.status} {a.last_run.summary() if a.last_run else ''}")
     print(f"  B 结果: {b.status} {b.last_run.summary() if b.last_run else ''}")
@@ -249,13 +460,14 @@ def cmd_demo(args) -> int:
     print("场景二：A 提交失败（人数已满）→ B 条件成立，应继续填写 B")
     print("=" * 74)
     a2 = Task(name="问卷A", url=f"{base}/vm/A.aspx?force=full", start_at=_past(2),
-              answers={"q1": "1", "q2": "A的默认填写内容"}, group="今日问卷", priority=10,
-              retry_on_full=0)
+              answers={"q1": "1", "q2": "A的默认填写内容", "q3": "7"},
+              group="今日问卷", priority=10, retry_on_full=0)
     b2 = Task(name="问卷B", url=f"{base}/vm/B.aspx?force=ok", start_at=_past(1),
-              answers={"q1": "2", "q2": "B的默认填写内容"}, group="今日问卷", priority=5,
-              retry_on_full=0, start_rule="not submitted('问卷A')")
+              answers={"q1": "2", "q2": "B的默认填写内容", "q3": "7"},
+              group="今日问卷", priority=5, retry_on_full=0,
+              start_rule="not submitted('问卷A')")
     cfg2.tasks = [a2, b2]
-    sched2 = Scheduler(cfg2)
+    sched2 = Scheduler(cfg2, config_path=False)
     _pump_until_idle(sched2, [a2, b2], budget=6)
     print(f"  A 结果: {a2.status} {a2.last_run.summary() if a2.last_run else ''}")
     print(f"  B 结果: {b2.status} {b2.last_run.summary() if b2.last_run else ''}")
@@ -401,7 +613,48 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="立即执行一次并输出判定结果", parents=[common])
     p.add_argument("--task", required=True)
+    p.add_argument("--manual", action="store_true",
+                   help="忽略答案库，直接用任务里的默认填写内容")
+    p.add_argument("--dry-run", action="store_true", help="只检索答案不提交")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("probe", help="读取问卷题目并在答案库中检索答案（不提交）", parents=[common])
+    p.add_argument("--url", required=True, help="问卷网址")
+    p.add_argument("--static", action="store_true", help="不启动浏览器，直接 HTTP 解析")
+    p.add_argument("--brief", action="store_true", help="不显示选项列表")
+    p.add_argument("--json", action="store_true", help="额外输出 JSON")
+    p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser("resolve", help="预演：显示将会填写的内容（不提交）", parents=[common])
+    p.add_argument("--url", default="")
+    p.add_argument("--task", default="")
+    p.add_argument("--static", action="store_true")
+    p.add_argument("--brief", action="store_true")
+    p.set_defaults(func=cmd_resolve)
+
+    p = sub.add_parser("fill", help="按题目内容检索答案库并填写提交", parents=[common])
+    p.add_argument("--url", default="")
+    p.add_argument("--task", default="")
+    p.add_argument("--dry-run", action="store_true", help="只检索答案不提交")
+    p.add_argument("--headed", action="store_true",
+                   help="显示浏览器窗口（不隐藏），可降低触发安全校验的概率")
+    p.add_argument("--backend", default=None, choices=["auto", "mock", "selenium"])
+    p.add_argument("--browser", default=None, choices=["edge", "chrome"])
+    p.set_defaults(func=cmd_fill)
+
+    p = sub.add_parser("bank", help="查看/维护默认答案库", parents=[common])
+    p.add_argument("action", choices=["show", "add", "remove", "remember", "clear-pending"])
+    p.add_argument("--match", default="text", choices=["text", "regex", "expr"])
+    p.add_argument("--pattern", default="", help="题目文本（或 add/remove/remember 的目标）")
+    p.add_argument("--answer", default="")
+    p.add_argument("--note", default="")
+    p.add_argument("--bank-file", default=None, help="指定答案库文件（默认 data/answer_bank.json）")
+    p.set_defaults(func=cmd_bank)
+
+    p = sub.add_parser("learn", help="交互式为未命中的题目补答案（写入答案库）", parents=[common])
+    p.add_argument("--url", default="", help="问卷网址；省略则处理 pending 列表")
+    p.add_argument("--static", action="store_true")
+    p.set_defaults(func=cmd_learn)
 
     p = sub.add_parser("check-rule", help="校验条件表达式", parents=[common])
     p.add_argument("expr")

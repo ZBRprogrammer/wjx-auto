@@ -11,7 +11,14 @@ vendor/
 .pipcache/
 *.whl
 
-# 运行期数据（含各人任务配置，不入库）
+# 浏览器驱动（二进制，按 README §6 自行下载，不入库）
+drivers/*
+!drivers/.gitkeep
+
+# selenium-manager 下载缓存
+.selenium-cache/
+
+# 运行期数据（含各人任务配置与答案库，不入库）
 data/*.json
 data/*.json.bak
 logs/

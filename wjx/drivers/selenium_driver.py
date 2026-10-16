@@ -28,8 +28,9 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..models import RunResult
-from ..paths import SHOT_DIR, ensure_dirs
+from ..paths import SHOT_DIR, ensure_dirs, find_bundled_driver, setup_environment
 from .base import (
+    FULL_PATTERNS,
     DriverError,
     DriverUnavailable,
     FillDriver,
@@ -134,12 +135,75 @@ class SeleniumDriver(FillDriver):
     def __init__(self, settings: Any):
         super().__init__(settings)
         self._webdriver = None
+        self.last_questions: List[Any] = []      # 最近一次提取到的题目
+        self.last_matches: List[Any] = []        # 最近一次答案检索结果
+        self.last_resolution: Optional[Any] = None
+
+    # ------------------------------------------------------------------ #
+    # 按"题目内容"自动检索答案库并填写（顺序变化也能应对）
+    # ------------------------------------------------------------------ #
+    def auto_fill(self, task: Any, bank: Any, prepared: Any = None,
+                  record_pending: bool = True) -> FillOutcome:
+        from ..answers import record_pending as _record_pending
+        from ..questionnaire import extract_questions_browser
+
+        driver = prepared
+        own = False
+        if driver is None:
+            driver = self._new_browser()
+            own = True
+            try:
+                driver.get(task.url)
+                time.sleep(1.0)
+            except Exception as exc:
+                try:
+                    driver.quit()
+                finally:
+                    pass
+                return FillOutcome(result=RunResult.NAVIGATION_ERROR.value,
+                                   url_before=task.url, message=f"无法打开网址: {exc}")
+        try:
+            questions = extract_questions_browser(driver)
+            if not questions:
+                return FillOutcome(
+                    result=RunResult.VALIDATION_FAILED.value,
+                    url_before=driver.current_url,
+                    message="未能识别到任何题目（页面可能已结束、需登录或模板未适配）",
+                )
+            matches = bank.resolve_many(questions, overrides=getattr(task, "answers", {}) or {})
+            self.last_questions, self.last_matches = questions, matches
+
+            answers = {q.name: m.answer for q, m in zip(questions, matches) if m.ok and q.name}
+            unresolved = [q for q, m in zip(questions, matches) if not m.ok]
+            if record_pending and unresolved:
+                _record_pending(
+                    [{"question": q.label, "field": q.name, "qtype": q.qtype,
+                      "options": q.options} for q in unresolved],
+                    url=task.url,
+                )
+            outcome = self.submit(task, driver, answers=answers)
+            outcome.question_count = len(questions)
+            outcome.filled_count = len(answers)
+            outcome.unfilled = [q.label for q in unresolved]
+            if unresolved:
+                outcome.message = (
+                    f"{outcome.message}｜{len(unresolved)} 道题未在答案库中找到："
+                    + "; ".join(q.label[:20] for q in unresolved[:4])
+                )
+            return outcome
+        finally:
+            if own:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     # Selenium 延迟导入：不跑真实问卷时完全不占用内存
     # ------------------------------------------------------------------ #
     @staticmethod
     def _import_webdriver():
+        setup_environment()          # vendor/ 与 selenium-manager 缓存目录
         try:
             from selenium import webdriver  # type: ignore
             from selenium.webdriver.chrome.options import Options as ChromeOptions  # type: ignore
@@ -155,6 +219,7 @@ class SeleniumDriver(FillDriver):
         return webdriver, ChromeOptions, ChromeService, EdgeOptions, EdgeService
 
     def _new_browser(self):
+        setup_environment()
         webdriver, ChromeOptions, ChromeService, EdgeOptions, EdgeService = self._import_webdriver()
         browser = (getattr(self.settings, "browser", "edge") or "edge").lower()
         headless = bool(getattr(self.settings, "headless", True))
@@ -169,14 +234,36 @@ class SeleniumDriver(FillDriver):
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--window-size=1280,900")
         opts.add_argument("--log-level=3")
-        opts.add_experimental_option("excludeSwitches", ["enable-logging"]) if browser == "chrome" else None
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--disable-background-networking")
+        # 独立的浏览器数据目录：避免与用户正在使用的浏览器互相影响
+        user_data = setup_environment().parent / "run" / f"browser-{browser}"
+        user_data.mkdir(parents=True, exist_ok=True)
+        opts.add_argument(f"--user-data-dir={user_data}")
+        if browser == "chrome":
+            opts.add_experimental_option("excludeSwitches", ["enable-logging"])
 
         driver_path = (getattr(self.settings, "driver_path", "") or "").strip()
-        if driver_path:
-            service = service_cls(executable_path=driver_path) if os.path.exists(driver_path) else service_cls(driver_path)
-        else:
-            service = service_cls()
-        driver = webdriver.Edge(service=service, options=opts) if browser != "chrome" else webdriver.Chrome(service=service, options=opts)
+        if not driver_path:
+            driver_path = find_bundled_driver(browser)
+        try:
+            if driver_path and os.path.exists(driver_path):
+                service = service_cls(executable_path=driver_path)
+            elif driver_path:
+                service = service_cls(driver_path)
+            else:
+                service = service_cls()
+            driver = (webdriver.Edge(service=service, options=opts) if browser != "chrome"
+                      else webdriver.Chrome(service=service, options=opts))
+        except Exception as exc:
+            raise DriverUnavailable(
+                f"无法启动 {browser} 浏览器：{type(exc).__name__}: {str(exc)[:300]}\n"
+                "排查建议：\n"
+                "  1) 确认已安装 Edge/Chrome；\n"
+                "  2) 把与本机浏览器版本匹配的驱动放到项目的 drivers\\ 目录"
+                "（msedgedriver.exe / chromedriver.exe）；\n"
+                "  3) 或在「设置 → 浏览器驱动路径」中指定驱动位置。"
+            ) from exc
         driver.set_page_load_timeout(int(getattr(self.settings, "page_load_timeout", 30)))
         return driver
 
@@ -201,9 +288,12 @@ class SeleniumDriver(FillDriver):
             pass
 
     # ------------------------------------------------------------------ #
-    def submit(self, task: Any, prepared: Any = None) -> FillOutcome:
+    def submit(self, task: Any, prepared: Any = None,
+               answers: Optional[Dict[str, Any]] = None) -> FillOutcome:
         from selenium.common.exceptions import WebDriverException  # type: ignore
         from selenium.webdriver.common.by import By  # type: ignore
+
+        use_answers: Dict[str, Any] = answers if answers is not None else dict(getattr(task, "answers", {}) or {})
 
         driver = prepared
         own_driver = False
@@ -217,6 +307,10 @@ class SeleniumDriver(FillDriver):
                 return FillOutcome(result=RunResult.NAVIGATION_ERROR.value,
                                    url_before=task.url, message=f"无法打开网址: {exc}")
         try:
+            # 进入页面后先点掉"是否继续上次回答"之类的拦路弹窗，否则无法填题
+            entry_dialog = _dismiss_dialogs(driver, By)
+            if entry_dialog:
+                time.sleep(0.5)
             spec = driver.execute_script(FORM_SPEC_JS, list(CONTAINER_SELECTORS))
             url_before = spec.get("url") or driver.current_url
             fields: List[Dict[str, Any]] = spec.get("fields", [])
@@ -226,41 +320,83 @@ class SeleniumDriver(FillDriver):
 
             for field in fields:
                 key = field.get("key")
-                raw = (task.answers or {}).get(key)
+                raw = use_answers.get(key)
                 if raw is None or key is None:
                     continue
                 ok, err = self._fill_field(driver, field, raw, By)
-                if ok:
+                # 有些弹窗会在填写过程中出现（如"是否继续上次回答"填写后才弹）
+                if _dismiss_dialogs(driver, By, rounds=1):
+                    time.sleep(0.4)
+                # 回读实际值，确认填写是否真的生效
+                actual = self._read_field_value(driver, field, By)
+                if actual:
                     filled += 1
                 else:
-                    unfilled.append(f"{key}({err})")
+                    unfilled.append(f"{key}({err})" if err else key)
                 if delay:
                     time.sleep(delay)
 
-            # 提交
-            clicked = self._click_submit(driver, By)
-            wait_seconds = max(1, int(getattr(self.settings, "submit_wait_seconds", 6)))
-            dialog_text = ""
+            # 提交（问卷星偶尔会返回"需要安全校验，请重新提交"，会重试几次）
+            pre_submit_dialog = _dismiss_dialogs(driver, By)
+            clicked = False
+            dialog_text = pre_submit_dialog or ""
+            captcha = False
             url_after = driver.current_url
             page_text = ""
-            deadline = time.time() + wait_seconds
-            while time.time() < deadline:
-                time.sleep(0.3)
-                try:
-                    dialog_text = self._read_dialog(driver, By) or dialog_text
-                    url_after = driver.current_url
-                    if dialog_text:
+            retries = max(0, int(getattr(self.settings, "submit_retries", 3)))
+            wait_seconds = max(1, int(getattr(self.settings, "submit_wait_seconds", 6)))
+
+            for attempt in range(retries + 1):
+                clicked = self._click_submit(driver, By) or clicked
+                deadline = time.time() + wait_seconds
+                while time.time() < deadline:
+                    time.sleep(0.3)
+                    try:
+                        _dismiss_dialogs(driver, By, rounds=1)
+                        new_dialog = self._read_dialog(driver, By)
+                        if new_dialog:
+                            dialog_text = new_dialog
+                        url_after = driver.current_url
+                        if _url_changed(url_before, url_after):
+                            break
+                        if new_dialog and any(p in new_dialog for p in FULL_PATTERNS):
+                            break
+                    except WebDriverException:
                         break
-                    if _url_changed(url_before, url_after):
-                        break
-                except WebDriverException:
+                if _url_changed(url_before, url_after):
                     break
+                captcha = _has_captcha(driver, By)
+                if captcha:
+                    break
+                try:
+                    page_text = driver.find_element(By.TAG_NAME, "body").text or ""
+                except Exception:
+                    page_text = ""
+                transient = "安全校验" in page_text or "请重新提交" in page_text
+                if not transient or attempt >= retries:
+                    break
+                log.info("提交被要求安全校验，%.1fs 后重试（第 %d/%d 次）",
+                         float(getattr(self.settings, "submit_retry_delay", 3.0)),
+                         attempt + 1, retries)
+                time.sleep(float(getattr(self.settings, "submit_retry_delay", 3.0)))
+
             try:
                 page_text = driver.find_element(By.TAG_NAME, "body").text or ""
             except Exception:
                 page_text = ""
 
-            result, message = classify_post_submit(url_before, url_after, page_text, dialog_text)
+            if captcha:
+                dialog_text = dialog_text or "需要安全校验，请重新提交"
+                result, message = RunResult.CAPTCHA.value, (
+                    "问卷触发了安全校验（阿里云验证码）："
+                    f"{_captcha_title(driver, By) or '请人工完成验证后重试'}。"
+                    "本工具不会绕过验证码；可改用人机交互模式（设置里关闭无头模式）后手动完成一次验证。"
+                )
+            else:
+                result, message = classify_post_submit(url_before, url_after, page_text, dialog_text)
+            note = "" if clicked else "（未找到提交按钮，可能已提交过或页面结构异常）"
+            if unfilled:
+                note += f"（{len(unfilled)} 个字段回读为空: {', '.join(unfilled[:4])}）"
             outcome = FillOutcome(
                 result=result,
                 url_before=url_before,
@@ -269,7 +405,7 @@ class SeleniumDriver(FillDriver):
                 filled_count=filled,
                 unfilled=unfilled,
                 dialog_text=dialog_text,
-                message=message + ("" if clicked else "（未找到提交按钮，可能已提交过或页面结构异常）"),
+                message=message + note,
             )
             if not outcome.ok:
                 outcome.message = f"{outcome.message}｜截图: {self._screenshot(driver, task)}"
@@ -282,48 +418,59 @@ class SeleniumDriver(FillDriver):
                     pass
 
     # ------------------------------------------------------------------ #
-    def _fill_field(self, driver, field: Dict[str, Any], raw: Any, By) -> tuple:
+    def _fill_field(self, driver, field: Dict[str, Any], raw: Any, By,
+                    container: Any = None) -> tuple:
+        """按**字段名**定位控件并填写（比按位置索引可靠：问卷星会重排/隐藏题目）。
+
+        返回 (是否填写成功, 错误说明)。
+        """
         ftype = (field.get("type") or "text").lower()
         options: List[Dict[str, Any]] = field.get("options") or []
-        index = int(field.get("index", 0))
-        container = driver.find_elements(By.CSS_SELECTOR, ",".join(CONTAINER_SELECTORS))[index]
+        key = str(field.get("key") or "")
+        if container is None:
+            container = self._find_container(driver, field, By)
+        if container is None:
+            return False, "未找到题目容器"
 
-        if ftype in ("radio", "checkbox"):
+        if ftype in ("radio", "checkbox") and key:
             picks = raw if isinstance(raw, (list, tuple)) else [raw]
             chosen = 0
             for want in picks:
                 want_s = str(want).strip()
                 if not want_s:
                     continue
-                if ftype == "radio":
-                    # 问卷星单选题点击后会重排选项，必须每次重新取容器
-                    container = driver.find_elements(By.CSS_SELECTOR, ",".join(CONTAINER_SELECTORS))[index]
                 matched = _match_option(options, want_s)
                 if matched is None:
                     return False, f"选项 '{want_s}' 未找到"
                 pos = _option_position(options, matched)
-                if not self._click_option(driver, container, By, ftype, pos):
+                if not self._click_option_name(driver, By, ftype, key, pos):
                     return False, f"选项 '{want_s}' 点击失败"
                 chosen += 1
-            return chosen > 0, "未选择" if chosen == 0 else ""
+            return chosen > 0, ("" if chosen else "未选择")
 
-        if ftype == "select":
+        if ftype == "select" and key:
             from selenium.webdriver.support.ui import Select  # type: ignore
 
             matched = _match_option(options, str(raw))
             if matched is None:
                 return False, "下拉项未找到"
-            Select(container.find_elements(By.TAG_NAME, "select")[0]).select_by_value(str(matched.get("value")))
+            els = driver.find_elements(By.CSS_SELECTOR, f'select[name="{key}"]')
+            if not els:
+                return False, "未找到下拉框"
+            Select(els[0]).select_by_value(str(matched.get("value")))
             return True, ""
 
         # 文本类
         value = "" if raw is None else str(raw)
+        els = []
+        if key:
+            els = driver.find_elements(By.CSS_SELECTOR, f'input[name="{key}"], textarea[name="{key}"]')
+        if not els:
+            els = self._fallback_inputs(container, By, ftype)
+        if not els:
+            return False, "未找到输入框"
+        el = els[0]
         try:
-            if ftype == "textarea":
-                el = container.find_elements(By.TAG_NAME, "textarea")[0]
-            else:
-                els = container.find_elements(By.CSS_SELECTOR, "input[type=text], input:not([type])")
-                el = els[0]
             driver.execute_script(ANCHOR_JS, container, el)
             el.clear()
             el.send_keys(value)
@@ -331,51 +478,80 @@ class SeleniumDriver(FillDriver):
         except Exception as exc:
             return False, f"填写失败 {type(exc).__name__}"
 
+    @staticmethod
+    def _fallback_inputs(container: Any, By, ftype: str) -> List[Any]:
+        try:
+            if ftype == "textarea":
+                return container.find_elements(By.TAG_NAME, "textarea")
+            return container.find_elements(By.CSS_SELECTOR, "input[type=text], input:not([type])")
+        except Exception:
+            return []
+
+    @staticmethod
+    def _find_container(driver, field: Dict[str, Any], By) -> Any:
+        """优先按控件 name 反查其所属题目容器；失败再退回位置索引。"""
+        key = str(field.get("key") or "")
+        if key:
+            for sel in (f'input[name="{key}"]', f'textarea[name="{key}"]',
+                        f'select[name="{key}"]'):
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                except Exception:
+                    els = []
+                for el in els:
+                    try:
+                        return el.find_element(
+                            By.XPATH,
+                            "ancestor::div[contains(@class,'field')][1] | ancestor::fieldset[1]",
+                        )
+                    except Exception:
+                        continue
+        try:
+            return driver.find_elements(By.CSS_SELECTOR, ",".join(CONTAINER_SELECTORS))[
+                int(field.get("index", 0))
+            ]
+        except Exception:
+            return None
+
+    def _click_option_name(self, driver, By, ftype: str, name: str, pos: int) -> bool:
+        """按 name 找到第 pos 个选项并点击（兼容 display:none 的控件）。"""
+        try:
+            inputs = driver.find_elements(By.CSS_SELECTOR, f'input[type={ftype}][name="{name}"]')
+        except Exception:
+            return False
+        if pos < 0 or pos >= len(inputs):
+            return False
+        return self._click_option_element(driver, inputs[pos], By, ftype)
+
     def _click_option(self, driver, container, By, ftype: str, pos: int) -> bool:
-        """依次尝试多个可见点击目标，并回读选中状态确认。"""
+        """按容器内位置点击选项（保留给矩阵题等场景）。"""
         inputs = container.find_elements(By.CSS_SELECTOR, f'input[type={ftype}]')
         if pos < 0 or pos >= len(inputs):
             return False
-        target = inputs[pos]
+        return self._click_option_element(driver, inputs[pos], By, ftype)
+
+    def _click_option_element(self, driver, target, By, ftype: str) -> bool:
+        """依次尝试多个可见点击目标，并回读选中状态确认。"""
         label = "radio" if ftype == "radio" else "checkbox"
         candidates = []
-        try:
-            candidates.append(target.find_element(By.XPATH, "ancestor::label[1]"))
-        except Exception:
-            pass
-        try:
-            candidates.append(target.find_element(By.XPATH, "following-sibling::a[1]"))
-        except Exception:
-            pass
-        try:
-            candidates.append(
-                target.find_element(
-                    By.XPATH,
-                    'ancestor::span[contains(@class,"wrapper")][1]',
-                )
-            )
-        except Exception:
-            pass
-        try:
-            candidates.append(
-                target.find_element(
-                    By.XPATH,
-                    'ancestor::div[contains(@class,"ui-radio") or contains(@class,"ui-checkbox")][1]'
-                    '//div[contains(@class,"label")][1]',
-                )
-            )
-        except Exception:
-            pass
-        try:
-            candidates.append(target.find_element(By.XPATH, 'following-sibling::div[contains(@class,"label")][1]'))
-        except Exception:
-            pass
+        for xpath in (
+            "ancestor::label[1]",
+            "following-sibling::a[1]",
+            'ancestor::span[contains(@class,"wrapper")][1]',
+            'ancestor::div[contains(@class,"ui-radio") or contains(@class,"ui-checkbox")][1]'
+            '//div[contains(@class,"label")][1]',
+            'following-sibling::div[contains(@class,"label")][1]',
+        ):
+            try:
+                candidates.append(target.find_element(By.XPATH, xpath))
+            except Exception:
+                continue
 
         for cand in candidates:
             try:
                 if not cand.is_displayed():
                     continue
-                driver.execute_script(ANCHOR_JS, container, cand)
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", cand)
                 cand.click()
                 if target.is_selected():
                     return True
@@ -421,6 +597,30 @@ class SeleniumDriver(FillDriver):
             pass
         return False
 
+    def _read_field_value(self, driver, field: Dict[str, Any], By) -> str:
+        """回读字段当前值，用于确认填写真的生效（空值会被报告为未填）。"""
+        ftype = (field.get("type") or "text").lower()
+        key = str(field.get("key") or "")
+        try:
+            if ftype in ("radio", "checkbox") and key:
+                els = driver.find_elements(By.CSS_SELECTOR, f'input[type={ftype}][name="{key}"]')
+                return ",".join((e.get_attribute("value") or "") for e in els if e.is_selected())
+            if key:
+                els = driver.find_elements(By.CSS_SELECTOR, f'input[name="{key}"], textarea[name="{key}"]')
+                if els:
+                    return (els[0].get_attribute("value") or "").strip()
+            container = self._find_container(driver, field, By)
+            if container is None:
+                return ""
+            if ftype == "select":
+                from selenium.webdriver.support.ui import Select  # type: ignore
+
+                return Select(container.find_elements(By.TAG_NAME, "select")[0]).first_selected_option.text
+            els = self._fallback_inputs(container, By, ftype)
+            return (els[0].get_attribute("value") or "").strip() if els else ""
+        except Exception:
+            return ""
+
     def _read_dialog(self, driver, By) -> str:
         for sel in DIALOG_SELECTORS:
             try:
@@ -452,6 +652,108 @@ def _url_changed(before: str, after: str) -> bool:
 
     strip = lambda u: re.sub(r"#.*$", "", (u or "").strip().rstrip("/")).lower()
     return bool(after) and strip(after) != strip(before)
+
+
+def _option_position(options: Sequence[Dict[str, Any]], matched: Dict[str, Any]) -> int:
+    """给定选项对象，返回它在选项列表中的下标（用于按 name 找到第 N 个 input）。"""
+    for i, o in enumerate(options):
+        if o is matched:
+            return i
+        if str(o.get("value")) == str(matched.get("value")) and \
+                str(o.get("label")) == str(matched.get("label")):
+            return i
+    return 0
+
+
+# 问卷星常见"拦路"弹窗（点掉才能继续填）
+DIALOG_ACCEPT_TEXTS: Sequence[str] = (
+    "继续上次回答", "继续回答", "继续填写", "继续", "确定", "好的", "是",
+)
+DIALOG_REJECT_TEXTS: Sequence[str] = (
+    "重新填写", "放弃", "取消", "否",
+)
+
+DISMISS_DIALOG_JS = r"""
+const accept = arguments[0], reject = arguments[1];
+const vis = el => {
+  if (!el) return false;
+  const s = window.getComputedStyle(el);
+  if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
+// 收集"看起来像弹窗/提示"的容器
+const containers = Array.from(document.querySelectorAll(
+  '.layui-layer, .layui-layer-content, .layer-content, .ui-dialog, .popup, ' +
+  '#popup_container, #divTip, .modal, .jq-toast-single, [class*=dialog], [class*=popup]'))
+  .filter(vis);
+const texts = containers.map(c => (c.innerText || '').trim()).filter(Boolean).join(' | ');
+if (!containers.length) return {text: '', clicked: ''};
+// 优先点"继续"类按钮
+const all = containers.flatMap(c => Array.from(c.querySelectorAll('a,button,div,span,input[type=button],input[type=submit]')));
+const pick = (words) => all.find(el => {
+  if (!vis(el)) return false;
+  const t = (el.innerText || el.value || '').trim();
+  return t.length > 0 && t.length <= 12 && words.some(w => t === w || t.includes(w));
+});
+let target = pick(accept);
+let clicked = '';
+if (target) { clicked = (target.innerText || target.value || '').trim(); }
+else { target = pick(reject); if (target) clicked = (target.innerText || target.value || '').trim(); }
+if (target) { target.click(); }
+return {text: texts.slice(0, 200), clicked: clicked};
+"""
+
+
+def _dismiss_dialogs(driver, By, prefer_accept: bool = True, rounds: int = 3) -> str:
+    """点掉问卷星的"是否继续上次回答"等拦路弹窗，返回最后一次弹窗文本。"""
+    last_text = ""
+    for _ in range(rounds):
+        try:
+            info = driver.execute_script(DISMISS_DIALOG_JS,
+                                         list(DIALOG_ACCEPT_TEXTS), list(DIALOG_REJECT_TEXTS))
+        except Exception:
+            return last_text
+        if not info or not info.get("text"):
+            return last_text
+        last_text = info.get("text") or last_text
+        if not info.get("clicked"):
+            return last_text
+        time.sleep(0.6)
+    return last_text
+
+
+# 阿里云验证码（问卷星的"安全校验"）出现标志：只检测、不破解
+CAPTCHA_SELECTORS: Sequence[str] = (
+    "#captchaWrap", "#captchaOut", "#captchabtn", "#aliyunCaptcha",
+    ".nc-container", "#nc_1_wrapper", ".aliyun-captcha",
+)
+
+
+def _has_captcha(driver, By) -> bool:
+    for sel in CAPTCHA_SELECTORS:
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                try:
+                    if el.is_displayed():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
+
+
+def _captcha_title(driver, By) -> str:
+    try:
+        for sel in ("#captchaTit", "#captchaWrap"):
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                text = (el.text or "").strip()
+                if text:
+                    return text[:120]
+    except Exception:
+        pass
+    return ""
 
 
 def _sleep(seconds: float) -> None:

@@ -41,7 +41,12 @@ class Scheduler:
                  config_path=None):
         self.cfg = cfg
         self.on_event = on_event
+        # config_path=None -> 使用默认配置文件；config_path=False -> 只读，绝不落盘
+        # （自测/演示必须用 False，否则会污染用户的任务配置）
         self.config_path = config_path
+        self.read_only = config_path is False
+        if config_path is False:
+            self.config_path = None
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -55,6 +60,8 @@ class Scheduler:
         self._t0 = time.time()
         self._t0_virtual = datetime.now()
         self._drivers: Dict[str, Any] = {}
+        self._bank = None                     # 答案库按需加载
+        self._resolution_cache: Dict[str, Any] = {}   # url -> (时间戳, Resolution)
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -314,43 +321,124 @@ class Scheduler:
             return
 
         prepared = self._take_prepared(task)
-        outcome = FillOutcome(result=RunResult.UNKNOWN.value)
+
+        # 自动检索答案库路径：先把题目抓下来 → 在答案库中查答案 → 填写提交
+        if self.cfg.settings.auto_answer:
+            rec = self._run_task_auto(task, rec, prepared)
+        else:
+            rec = self._run_task_direct(task, rec, prepared)
+
+        rec.finished_at = self.wall_clock().strftime("%Y-%m-%d %H:%M:%S")
+        self._finish(task, rec)
+        self._maybe_retry(task, rec)
+
+    # ------------------------------------------------------------------ #
+    def _run_task_auto(self, task: Task, rec: RunRecord, prepared: Any) -> RunRecord:
+        from . import autorun
+
+        res = self._resolve_questions(task)
+        if not res.ok:
+            from .autorun import _classify_probe_error
+
+            rec.result = _classify_probe_error(res.error)
+            rec.message = res.error or "未能识别到题目"
+            log.error("题目提取失败：%s", rec.message)
+            return rec
+
+        unresolved = res.unresolved
+        if unresolved:
+            log.warning("%s 有 %d 道题未在答案库中找到：%s", task.name, len(unresolved),
+                        "; ".join(q.label[:20] for q in unresolved[:4]))
+            autorun.record_pending(
+                [{"question": q.label, "field": q.name, "qtype": q.qtype, "options": q.options}
+                 for q in unresolved], url=task.url)
+            self._emit("unresolved", task,
+                       message=f"{len(unresolved)} 道题未命中答案库",
+                       questions=[q.label for q in unresolved])
+
+        answers = dict(res.answers)
+        for k, v in (task.answers or {}).items():
+            if v not in (None, "", []):
+                answers[k] = v
+
         try:
             driver = self._get_driver(task)
-            outcome = driver.submit(task, prepared)
-        except DriverUnavailable as exc:
-            rec.result = RunResult.DRIVER_ERROR.value
-            rec.message = str(exc)
-            log.error("后端不可用：%s", exc)
-        except DriverError as exc:
-            rec.result = RunResult.DRIVER_ERROR.value
-            rec.message = str(exc)
-            log.error("填写失败：%s", exc)
+            try:
+                outcome = driver.submit(task, prepared, answers=answers)
+            except TypeError:
+                # 后端 submit 不支持 answers 参数：把答案写回任务再提交
+                task.answers = answers
+                outcome = driver.submit(task, prepared)
         except Exception as exc:
-            text = f"{type(exc).__name__}: {exc}"
-            # 打不开页面类的异常归入 navigation_error，便于条件规则区分处理
-            if any(k in text for k in ("ConnectionError", "无法连接", "无法打开", "refused",
-                                       "timed out", "超时", "URLError", "NameNotResolved")):
-                rec.result = RunResult.NAVIGATION_ERROR.value
-                rec.message = f"无法打开网址: {exc}"
-                log.error("无法打开网址：%s", exc)
-            else:
-                rec.result = RunResult.DRIVER_ERROR.value
-                rec.message = text
-                log.exception("填写异常")
+            return self._driver_error(rec, exc)
 
-        if outcome.result:
-            rec.result = outcome.result
+        rec.result = outcome.result or RunResult.UNKNOWN.value
+        rec.url_before = outcome.url_before or task.url
+        rec.url_after = outcome.url_after
+        rec.dialog_text = outcome.dialog_text
+        rec.message = (f"识别 {len(res.questions)} 题，答案库命中 "
+                       f"{len(res.questions) - len(unresolved)} 题｜{outcome.message}")
+        if outcome.unfilled:
+            rec.message += f"｜未填: {', '.join(str(x)[:16] for x in outcome.unfilled[:4])}"
+        return rec
+
+    def _run_task_direct(self, task: Task, rec: RunRecord, prepared: Any) -> RunRecord:
+        outcome = FillOutcome(result=RunResult.UNKNOWN.value)
+        try:
+            outcome = self._get_driver(task).submit(task, prepared)
+        except Exception as exc:
+            return self._driver_error(rec, exc)
+
+        rec.result = outcome.result or RunResult.UNKNOWN.value
         rec.url_before = outcome.url_before or task.url
         rec.url_after = outcome.url_after
         rec.dialog_text = outcome.dialog_text
         rec.message = outcome.message
-        rec.finished_at = self.wall_clock().strftime("%Y-%m-%d %H:%M:%S")
         if outcome.unfilled:
-            rec.message = f"{rec.message}｜未填: {', '.join(outcome.unfilled[:5])}"
+            rec.message += f"｜未填: {', '.join(str(x)[:16] for x in outcome.unfilled[:4])}"
+        return rec
 
-        self._finish(task, rec)
-        self._maybe_retry(task, rec)
+    def _driver_error(self, rec: RunRecord, exc: Exception) -> RunRecord:
+        text = f"{type(exc).__name__}: {exc}"
+        if isinstance(exc, (DriverUnavailable, DriverError)):
+            rec.result = RunResult.DRIVER_ERROR.value
+            rec.message = str(exc)
+            log.error("填写后端异常：%s", exc)
+        elif any(k in text for k in ("ConnectionError", "无法连接", "无法打开", "refused",
+                                     "timed out", "超时", "URLError", "NameNotResolved")):
+            rec.result = RunResult.NAVIGATION_ERROR.value
+            rec.message = f"无法打开网址: {exc}"
+            log.error("无法打开网址：%s", exc)
+        else:
+            rec.result = RunResult.DRIVER_ERROR.value
+            rec.message = text
+            log.exception("填写异常")
+        return rec
+
+    def _resolve_questions(self, task: Task):
+        """提取题目并检索答案（带缓存，避免短时间内重复打开页面）。"""
+        from . import autorun
+
+        ttl = max(10, int(self.cfg.settings.probe_cache_seconds))
+        cached = self._resolution_cache.get(task.url)
+        if cached and (time.time() - cached[0]) < ttl:
+            return cached[1]
+        res = autorun.probe_questions(self.cfg, task.url, prefer_browser=True,
+                                      bank=self.answer_bank())
+        if res.ok:
+            self._resolution_cache[task.url] = (time.time(), res)
+        return res
+
+    def answer_bank(self):
+        if self._bank is None:
+            from .answers import AnswerBank
+
+            self._bank = AnswerBank.load()
+        return self._bank
+
+    def reload_bank(self) -> None:
+        self._bank = None
+        self._resolution_cache.clear()
 
     def _finish(self, task: Task, rec: RunRecord) -> None:
         task.record(rec)
@@ -431,6 +519,8 @@ class Scheduler:
         self._drivers.clear()
 
     def _persist(self) -> None:
+        if self.read_only:
+            return
         try:
             config_mod.save_config(self.cfg, self.config_path)
         except Exception as exc:

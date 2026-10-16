@@ -36,6 +36,7 @@ class TaskStatus(str, Enum):
 class RunResult(str, Enum):
     SUCCESS = "success"                 # 提交后跳转到新页面
     FULL = "full"                       # 弹窗：问卷填写人数过多
+    CAPTCHA = "captcha"                 # 触发安全校验（阿里云验证码），需人工完成
     VALIDATION_FAILED = "validation"    # 停留在原页面（必填未通过等）
     UNKNOWN = "unknown"                 # 停留原页但没有识别到弹窗
     BLOCKED = "blocked"                 # 未登录 / 问卷已关闭
@@ -56,6 +57,7 @@ STATUS_TEXT = {
 RESULT_TEXT = {
     RunResult.SUCCESS: "提交成功（已跳转）",
     RunResult.FULL: "横幅提示：填写人数过多",
+    RunResult.CAPTCHA: "触发安全校验（需人工完成验证码后重试）",
     RunResult.VALIDATION_FAILED: "仍停留原页面（校验未通过）",
     RunResult.UNKNOWN: "仍停留原页面（原因未知）",
     RunResult.BLOCKED: "问卷不可用（已结束/需登录）",
@@ -102,13 +104,16 @@ class RunRecord:
 # --------------------------------------------------------------------------- #
 # 任务
 # --------------------------------------------------------------------------- #
-# 答案键约定（"默认填写内容"）:
+# 答案键约定（"默认填写内容"，可选）:
 #   {"q1": "A",                  # 单选：选项序号(1 起) 或 选项文案
 #    "q2": ["A", "C"],           # 多选：序号/文案列表
 #    "q3": "张三",               # 填空
 #    "q4": {"index": 2},         # 下拉
 #    "q5": {"exclude": true}}    # 特殊：矩阵题等由驱动自行处理
-DEFAULT_TEMPLATE_ANSWERS: Dict[str, Any] = {"q1": "A", "q2": "示例文本"}
+#
+# 注意：这里只是"可选的临时覆盖"。正常流程是 task.answers 留空，
+# 由 wjx/answers.py 的答案库按题目内容自动检索答案（顺序变化也能匹配）。
+DEFAULT_TEMPLATE_ANSWERS: Dict[str, Any] = {}
 
 
 @dataclass
@@ -128,8 +133,9 @@ class Task:
     reminder_minutes: int = 5      # 提前 N 分钟弹窗/响铃提醒
     preopen: bool = True           # 是否提前打开浏览器加载页面
 
-    # 默认填写内容
-    answers: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_TEMPLATE_ANSWERS))
+    # 默认填写内容：留空表示"完全交给答案库按题目内容检索"。
+    # 只有用户显式填写的内容才会覆盖答案库（按字段名生效）。
+    answers: Dict[str, Any] = field(default_factory=dict)
     answer_text: str = ""          # 原始文本形式（GUI 编辑用），保存时解析进 answers
 
     # 条件与优先级
@@ -254,10 +260,10 @@ class Task:
 
 @dataclass
 class AppSettings:
-    backend: str = "mock"              # mock | selenium
+    backend: str = "auto"              # auto | mock | selenium
     headless: bool = True
     browser: str = "edge"              # edge | chrome
-    driver_path: str = ""              # msedgedriver/chromedriver，留空则用 selenium-manager
+    driver_path: str = ""              # msedgedriver/chromedriver，留空则用项目 drivers/ 或 selenium-manager
     sound_enabled: bool = True
     popup_enabled: bool = True
     tray_enabled: bool = True          # 最小化到系统托盘，后台低内存运行
@@ -268,6 +274,10 @@ class AppSettings:
     fill_delay_ms: int = 120           # 每题之间的人工延迟
     submit_wait_seconds: int = 6       # 点击提交后等待判定跳转
     respect_min_interval: int = 3      # 同一任务两次执行的最小间隔（秒）
+    auto_answer: bool = True           # 自动读取题目并在答案库中检索答案
+    probe_cache_seconds: int = 300     # 题目结构的缓存时间（秒），避免重复打开页面
+    submit_retries: int = 3            # 提交遇到"需要安全校验，请重新提交"时的重试次数
+    submit_retry_delay: float = 3.0    # 上述重试的间隔（秒）
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

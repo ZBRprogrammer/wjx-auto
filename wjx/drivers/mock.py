@@ -38,6 +38,10 @@ class MockDriver(FillDriver):
         try:
             with urllib.request.urlopen(probe, timeout=self.TIMEOUT) as resp:
                 raw = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            raise ConnectionError(
+                f"模拟问卷服务返回 {exc.code}，该网址不是模拟问卷（{_base_of(url)}/vm/A.aspx）"
+            ) from exc
         except urllib.error.URLError as exc:
             raise ConnectionError(f"无法连接模拟问卷服务 ({self._base()}): {exc}") from exc
         try:
@@ -61,7 +65,9 @@ class MockDriver(FillDriver):
         return None
 
     # ------------------------------------------------------------------ #
-    def submit(self, task: Any, prepared: Any = None) -> FillOutcome:
+    def submit(self, task: Any, prepared: Any = None,
+               answers: Optional[Dict[str, Any]] = None) -> FillOutcome:
+        use_answers: Dict[str, Any] = answers if answers is not None else dict(getattr(task, "answers", {}) or {})
         spec = (prepared or {}).get("spec")
         if not spec:
             try:
@@ -74,7 +80,7 @@ class MockDriver(FillDriver):
                     message=f"无法打开网址: {exc}",
                 )
         fields: List[Dict[str, Any]] = spec.get("fields", [])
-        payload = build_form_payload(fields, task.answers or {}, prefix=spec.get("prefix", ""))
+        payload = build_form_payload(fields, use_answers, prefix=spec.get("prefix", ""))
         unresolved = payload.pop("__unresolved__", "")
         unfilled = [f["key"] for f in fields if f.get("required") and not payload.get(f.get("key"))]
 
@@ -137,6 +143,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
         return None
+
+
+def _base_of(url: str) -> str:
+    import re
+
+    m = re.match(r"^(https?://[^/]+)", url or "")
+    return m.group(1) if m else ""
 
 
 def _extract_text(body: str, spec: Dict[str, Any]) -> tuple:

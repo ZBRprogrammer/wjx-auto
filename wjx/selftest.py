@@ -101,7 +101,7 @@ def test_reminder() -> None:
             reminder_minutes=5, prepare_minutes=5,
         )
         cfg.tasks = [task]
-        sched = Scheduler(cfg)
+        sched = Scheduler(cfg, config_path=False)
         events: List[dict] = []
         sched.on_event = events.append
         for _ in range(3):
@@ -126,7 +126,7 @@ def test_reminder() -> None:
                    reminder_minutes=5)
         cfg2.tasks = [far]
         calls.clear()
-        sched2 = Scheduler(cfg2)
+        sched2 = Scheduler(cfg2, config_path=False)
         sched2._tick()
         _check("未到提醒窗口不打扰", not calls, str(calls))
     finally:
@@ -182,6 +182,119 @@ def _config_io_checks(tmp_root, json, config_mod, Path) -> None:
     _check("损坏配置不崩溃且回退到备份", isinstance(cfg3.tasks, list), f"tasks={len(cfg3.tasks)}")
 
 
+def test_answers_bank() -> None:
+    """答案库：算术求值、按题检索、顺序无关、记住答案、未配置占位。"""
+    from .answers import AnswerBank, AnswerRule, eval_arithmetic, normalize_expr
+    from .questionnaire import Question, clean_label
+
+    # 算术
+    _check("算术 11-4", eval_arithmetic("11-4") == "7")
+    _check("算术 5*8（乘号不被当必填星号）", eval_arithmetic("5*8") == "40")
+    _check("算术 9/3", eval_arithmetic("9/3") == "3")
+    _check("算术 6+7=?", eval_arithmetic("6+7=?") == "13")
+    _check("算术 3加5等于多少", eval_arithmetic("3加5等于多少") == "8")
+    _check("算术 12÷4（全角除号）", eval_arithmetic("12÷4") == "3")
+    _check("判断题 1+1=2 不当作求值题", normalize_expr("1+1=2") is None)
+    _check("非算术文本返回 None", normalize_expr("你喜欢什么颜色") is None)
+
+    # 题号/星号清洗
+    _check("清洗题号前缀", clean_label("1. 11-4") == "11-4")
+    _check("清洗必填星号但保留乘号", clean_label("* 5*8") == "5*8")
+    _check("清洗中文题号", clean_label("（2）9/3") == "9/3")
+
+    # 答案库检索
+    bank = AnswerBank(rules=[
+        AnswerRule.from_dict({"id": "a", "match": "text", "pattern": "你的姓名", "answer": "张三"}),
+        AnswerRule.from_dict({"id": "b", "match": "regex", "pattern": "性别", "answer": "男"}),
+        AnswerRule.from_dict({"id": "c", "match": "expr", "pattern": "arithmetic", "answer": ""}),
+        AnswerRule.from_dict({"id": "d", "match": "text", "pattern": "占位题",
+                              "answer": "未配置：请补充"}),
+    ])
+    m = bank.resolve("1. 你的姓名是？", "q1")
+    _check("文本规则命中（题目带题号也能匹配）", m.ok and m.answer == "张三", f"{m.answer}/{m.source}")
+    m = bank.resolve("2. 你的性别", "q2")
+    _check("正则规则命中", m.ok and m.answer == "男", f"{m.answer}/{m.source}")
+    m = bank.resolve("25*4", "q3")
+    _check("表达式规则算出答案", m.ok and m.answer == "100", f"{m.answer}/{m.source}")
+    m = bank.resolve("未登记的题目", "q4")
+    _check("未命中标记为 unknown", not m.ok and m.source == "unknown", m.source)
+    m = bank.resolve("占位题", "q5")
+    _check("未配置占位答案不参与提交", not m.ok and "未配置" in str(m.answer), str(m.answer))
+
+    # 顺序变化：字段名错位也能按题目内容给出正确答案
+    questions = [
+        Question(label="5*8", name="q1", qtype="text"),
+        Question(label="你的姓名是？", name="q2", qtype="text"),
+        Question(label="11-4", name="q3", qtype="text"),
+    ]
+    matches = bank.resolve_many(questions)
+    _check("顺序变化仍按题目内容作答",
+           [m.answer for m in matches] == ["40", "张三", "7"],
+           str([m.answer for m in matches]))
+
+    # 任务覆盖优先
+    m = bank.resolve("你的姓名是？", "q1", override="李四")
+    _check("任务自定义答案覆盖答案库", m.answer == "李四" and m.source == "override", m.source)
+
+    # 记住的答案
+    bank.remember("这里是一道新题", "记住的答案", source="test")
+    m = bank.resolve("这里是一道新题", "q9")
+    _check("记住的答案可复用", m.ok and m.answer == "记住的答案" and m.source == "remembered",
+           f"{m.answer}/{m.source}")
+
+    # 题库读写往返
+    import shutil
+    from pathlib import Path
+
+    from .paths import RUN_DIR
+
+    tmp = Path(RUN_DIR) / "selftest-bank"
+    if tmp.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        target = tmp / "bank.json"
+        bank.path = target
+        bank.save()
+        reloaded = AnswerBank.load(target)
+        _check("答案库读写往返一致",
+               len(reloaded.rules) == len(bank.rules)
+               and reloaded.resolve("你的姓名是？", "q1").answer == "张三",
+               f"rules={len(reloaded.rules)} remembered={len(reloaded.remembered)}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+def test_questionnaire_parse() -> None:
+    """真实问卷星 DOM（本项目实测结构）的题目提取。"""
+    from .questionnaire import parse_questions_html
+
+    html = """
+    <fieldset class='fieldset' id='fieldset1'>
+      <div class='field ui-field-contain' topic='1' id='div1' req='1' data-role='fieldcontain' type='1'>
+        <div class='field-label'><span class='req'>*</span>
+          <div class='topicnumber'>1.</div><div class='topichtml'>11-4</div></div>
+        <div class='ui-input-text'><input type='text' id='q1' name='q1'/></div>
+        <div class='errorMessage'></div>
+      </div>
+      <div class='field ui-field-contain' topic='2' id='div2' req='1' data-role='fieldcontain' type='3'>
+        <div class='field-label'><span class='req'>*</span>
+          <div class='topicnumber'>2.</div><div class='topichtml'>你更倾向哪一种方案？</div></div>
+        <div class='ui-radio'><input type='radio' name='q2' value='1'/><label>方案一</label>
+          <input type='radio' name='q2' value='2'/><label>方案二</label></div>
+      </div>
+    </fieldset>
+    """
+    qs = parse_questions_html(html)
+    _check("识别题目数量", len(qs) == 2, f"got {len(qs)}")
+    if len(qs) == 2:
+        _check("填空题题干与字段", qs[0].label == "11-4" and qs[0].name == "q1"
+               and qs[0].qtype == "text" and qs[0].required, str(qs[0].to_dict()))
+        _check("单选题题干与选项", qs[1].qtype == "radio" and len(qs[1].options) == 2
+               and qs[1].label.startswith("你更倾向"), str(qs[1].to_dict()))
+
+
 # --------------------------------------------------------------------------- #
 def test_backend_and_scheduler() -> None:
     httpd = mockserver.create_server(port=8791)
@@ -198,7 +311,7 @@ def test_backend_and_scheduler() -> None:
         cfg.tasks = []
         t_ok = Task(name="成功卷", url=f"{base}/vm/A.aspx", answers={"q1": "1", "q2": "ok"})
         cfg.tasks.append(t_ok)
-        sched = Scheduler(cfg)
+        sched = Scheduler(cfg, config_path=False)
         sched._start_task(t_ok, "自测")
         _join(sched, t_ok)
         _check("mock 后端提交成功", t_ok.status == TaskStatus.SUCCESS.value,
@@ -239,7 +352,7 @@ def test_backend_and_scheduler() -> None:
         b = Task(name="问卷B", url=f"{base}/vm/B.aspx", answers={"q1": "2", "q2": "B"},
                  start_at=_past(1), group="G", priority=5, start_rule="not submitted('问卷A')")
         cfg2.tasks = [a, b]
-        s2 = Scheduler(cfg2)
+        s2 = Scheduler(cfg2, config_path=False)
         _tick_until(s2, [a, b])
         _check("A 成功后 B 被跳过（互斥+条件）",
                a.status == TaskStatus.SUCCESS.value and b.status == TaskStatus.SKIPPED.value,
@@ -255,7 +368,7 @@ def test_backend_and_scheduler() -> None:
         b3 = Task(name="问卷B", url=f"{base}/vm/B.aspx?force=ok", answers={"q1": "2", "q2": "B"},
                   start_at=_past(1), group="G", priority=5, start_rule="not submitted('问卷A')")
         cfg3.tasks = [a3, b3]
-        s3 = Scheduler(cfg3)
+        s3 = Scheduler(cfg3, config_path=False)
         _tick_until(s3, [a3, b3])
         _check("A 失败后 B 继续填写成功",
                a3.last_run is not None and a3.last_run.result == "full"
@@ -272,7 +385,7 @@ def test_backend_and_scheduler() -> None:
         lo = Task(name="低优先", url=f"{base}/vm/B.aspx?force=ok", answers={"q1": "2", "q2": "lo"},
                   start_at=_past(), group="P", priority=1)
         cfg4.tasks = [hi, lo]
-        s4 = Scheduler(cfg4)
+        s4 = Scheduler(cfg4, config_path=False)
         s4._tick()
         time.sleep(1.2)
         s4._tick()
@@ -289,10 +402,44 @@ def test_backend_and_scheduler() -> None:
         old = Task(name="过期卷", url=f"{base}/vm/A.aspx", answers={"q1": "1", "q2": "x"},
                    start_at=_past(600), window_minutes=5)
         cfg5.tasks = [old]
-        s5 = Scheduler(cfg5)
+        s5 = Scheduler(cfg5, config_path=False)
         s5._tick()
         time.sleep(0.5)
         _check("超出窗口的过期任务不执行", old.attempts == 0, f"attempts={old.attempts}")
+        # 答案库路径：任务不给任何默认内容，全靠答案库按题目内容检索
+        from .answers import AnswerBank, AnswerRule
+
+        cfg_bank = AppConfig()
+        cfg_bank.settings.backend = "mock"
+        cfg_bank.settings.mock_base_url = base
+        t_bank = Task(name="答案库卷", url=f"{base}/vm/A.aspx", answers={})
+        cfg_bank.tasks = [t_bank]
+        bank = AnswerBank(rules=[
+            AnswerRule.from_dict({"id": "b1", "match": "regex", "pattern": "你更倾向哪一种方案",
+                                  "answer": "方案二"}),
+            AnswerRule.from_dict({"id": "b2", "match": "text", "pattern": "请填写你的默认备注",
+                                  "answer": "答案库自动填写的备注"}),
+            AnswerRule.from_dict({"id": "b3", "match": "expr", "pattern": "arithmetic", "answer": ""}),
+        ])
+        sched_bank = Scheduler(cfg_bank, config_path=False)
+        sched_bank._bank = bank
+        sched_bank._start_task(t_bank, "自测-答案库")
+        _join(sched_bank, t_bank)
+        _check("仅靠答案库即可提交成功（无任务默认内容）",
+               t_bank.status == TaskStatus.SUCCESS.value,
+               t_bank.last_run.summary() if t_bank.last_run else "")
+
+        # 答案库 + 顺序变化：把题目文案对调，仍应按题目内容给出答案
+        from .questionnaire import Question
+
+        qs = [Question(label="5*8", name="q1", qtype="text"),
+              Question(label="你更倾向哪一种方案？", name="q2", qtype="radio",
+                       options=[{"value": "1", "label": "方案一"},
+                                {"value": "2", "label": "方案二"}])]
+        ms = bank.resolve_many(qs)
+        _check("字段名与题目顺序错位时仍答对",
+               [m.answer for m in ms] == ["40", "方案二"], str([m.answer for m in ms]))
+
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -342,6 +489,8 @@ def run() -> int:
     test_classify()
     test_reminder()
     test_config_io()
+    test_answers_bank()
+    test_questionnaire_parse()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)

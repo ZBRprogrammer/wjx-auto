@@ -133,6 +133,7 @@ def default_tasks(settings: Optional[AppSettings] = None) -> List[Task]:
 
     A 无启动条件、优先级更高；B 的条件是"A 未提交成功才填"。
     两者同组，因此 A 成功后 B 会被自动跳过。
+    默认填写内容留空 —— 题目与答案由答案库（data/answer_bank.json）按题目内容检索。
     """
     base = (settings or AppSettings()).mock_base_url.rstrip("/")
     start_a = datetime.now() + timedelta(minutes=3)
@@ -141,7 +142,6 @@ def default_tasks(settings: Optional[AppSettings] = None) -> List[Task]:
         name="问卷A",
         url=f"{base}/vm/A.aspx",
         start_at=start_a.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S"),
-        answers={"q1": "1", "q2": "这是问卷A的默认填写内容"},
         group="今日问卷",
         priority=10,
         start_rule="",
@@ -152,7 +152,6 @@ def default_tasks(settings: Optional[AppSettings] = None) -> List[Task]:
         name="问卷B",
         url=f"{base}/vm/B.aspx",
         start_at=start_b.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S"),
-        answers={"q1": "2", "q2": "这是问卷B的默认填写内容"},
         group="今日问卷",
         priority=5,
         start_rule="not submitted('问卷A')",

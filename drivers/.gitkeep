@@ -1,0 +1,6 @@
+把与本机浏览器版本匹配的驱动放在本目录（二进制的驱动不入版本库）：
+
+    Edge   -> msedgedriver.exe   https://developer.microsoft.com/microsoft-edge/tools/webdriver/
+    Chrome -> chromedriver.exe   https://googlechromelabs.github.io/chrome-for-testing/
+
+也可以让 selenium-manager 自动查找，或在界面「设置 → 浏览器驱动路径」中指定。

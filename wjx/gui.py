@@ -186,14 +186,20 @@ class TaskDialog(tk.Toplevel):
 
         # --- 默认填写内容 ------------------------------------------------ #
         ans = ttk.Frame(nb, padding=12)
-        nb.add(ans, text=" 默认填写内容 ")
-        ttk.Label(ans, text="按题目字段名给出默认答案；值为选项序号或选项文案，多选用逗号分隔").pack(anchor="w")
-        self.txt_answers = tk.Text(ans, height=16, wrap="none", font=("Consolas", 10))
+        nb.add(ans, text=" 默认填写内容（可选覆盖） ")
+        ttk.Label(
+            ans,
+            text="通常留空即可：程序会按题目内容到「答案库」检索答案（题目顺序变化也能匹配）。\n"
+                 "只有需要临时覆盖某题时才在这里按字段名写，例如 q3 = 自定义答案；留空则完全使用答案库。",
+            foreground="#555", justify="left",
+        ).pack(anchor="w")
+        self.txt_answers = tk.Text(ans, height=14, wrap="none", font=("Consolas", 10))
         self.txt_answers.pack(fill="both", expand=True, pady=(6, 4))
         bar = ttk.Frame(ans)
         bar.pack(fill="x")
-        ttk.Button(bar, text="插入模板", command=self._insert_template).pack(side="left")
-        ttk.Button(bar, text="检查格式", command=self._check_answers).pack(side="left", padx=6)
+        ttk.Button(bar, text="读取该问卷的题目", command=self._probe_questions).pack(side="left")
+        ttk.Button(bar, text="插入模板", command=self._insert_template).pack(side="left", padx=6)
+        ttk.Button(bar, text="检查格式", command=self._check_answers).pack(side="left")
         self.answer_status = ttk.Label(bar, text="")
         self.answer_status.pack(side="left", padx=8)
 
@@ -289,6 +295,41 @@ class TaskDialog(tk.Toplevel):
         self.txt_answers.delete("1.0", "end")
         self.txt_answers.insert("1.0", TEMPLATE_ANSWERS)
 
+    def _probe_questions(self) -> None:
+        """读取该问卷题目，并在下面显示答案库检索结果（方便确认要覆盖哪些字段）。"""
+        url = self.var_url.get().strip()
+        if not url:
+            messagebox.showwarning("缺少网址", "请先填写问卷网址。", parent=self)
+            return
+        self.answer_status.configure(text="正在读取题目（首次可能启动浏览器）…", foreground="#555")
+
+        def worker() -> None:
+            from . import autorun
+
+            try:
+                res = autorun.probe_questions(self.app.cfg, url, prefer_browser=True,
+                                             bank=self.app.scheduler.answer_bank())
+                text = res.report()
+                self.after(0, lambda: self._show_probe_result(text, res.ok))
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                self.after(0, lambda: self._show_probe_result(message, False))
+
+        threading.Thread(target=worker, name="wjx-probe", daemon=True).start()
+
+    def _show_probe_result(self, text: str, ok: bool) -> None:
+        self.answer_status.configure(text="题目读取完成" if ok else "题目读取失败",
+                                     foreground=OK_COLOR if ok else BAD_COLOR)
+        win = tk.Toplevel(self)
+        win.title("题目与答案库检索结果")
+        win.geometry("820x520")
+        win.transient(self)
+        box = tk.Text(win, wrap="word", font=("Consolas", 10))
+        box.pack(fill="both", expand=True, padx=8, pady=8)
+        box.insert("1.0", text)
+        box.configure(state="disabled")
+        ttk.Button(win, text="关闭", command=win.destroy).pack(pady=(0, 8))
+
     def _check_answers(self) -> None:
         text = self.txt_answers.get("1.0", "end").strip()
         parsed = config_mod.parse_answer_text(text)
@@ -382,8 +423,13 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(frm, text="浏览器驱动路径（可留空自动查找）").grid(row=r, column=0, sticky="w", pady=6)
         ttk.Entry(frm, textvariable=self.var_driver, width=42).grid(row=r, column=1, sticky="w")
         r += 1
-        ttk.Checkbutton(frm, text="无头模式运行（后台静默，不显示浏览器窗口）",
+        ttk.Checkbutton(frm, text="无头模式运行（后台静默，不显示浏览器窗口；"
+                                  "若问卷要求安全校验可关闭此项）",
                         variable=self.var_headless).grid(row=r, column=1, sticky="w")
+        r += 1
+        self.var_auto_answer = tk.BooleanVar(value=s.auto_answer)
+        ttk.Checkbutton(frm, text="自动读取题目并在答案库中检索答案（推荐开启）",
+                        variable=self.var_auto_answer).grid(row=r, column=1, sticky="w")
         r += 1
         ttk.Label(frm, text="模拟问卷服务地址（mock 后端）").grid(row=r, column=0, sticky="w", pady=6)
         ttk.Entry(frm, textvariable=self.var_mock, width=42).grid(row=r, column=1, sticky="w")
@@ -424,9 +470,242 @@ class SettingsDialog(tk.Toplevel):
         s.mock_base_url = self.var_mock.get().strip() or s.mock_base_url
         s.submit_wait_seconds = int(self.var_submit_wait.get() or 6)
         s.fill_delay_ms = int(self.var_fill_delay.get() or 0)
+        s.auto_answer = bool(self.var_auto_answer.get())
         self.saved = True
         self.grab_release()
         self.destroy()
+
+
+# --------------------------------------------------------------------------- #
+# 答案库管理对话框
+# --------------------------------------------------------------------------- #
+class BankDialog(tk.Toplevel):
+    """默认答案库维护：按题目内容维护"题目 → 答案"的规则。"""
+
+    def __init__(self, master: "MainWindow"):
+        super().__init__(master)
+        self.app = master
+        self.title("默认答案库")
+        self.transient(master)
+        self.geometry("1000x620")
+        self.minsize(880, 520)
+        self.configure(bg=BG)
+
+        from .answers import AnswerBank
+
+        self.bank = AnswerBank.load()
+
+        outer = ttk.Frame(self, padding=10)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text=f"文件：{self.bank.path}").pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="规则按题目内容匹配：text=题目文字（含关键词即可）、regex=正则、expr=算术题自动计算。"
+                 "答案里写选项文字或序号均可；多选题用逗号分隔。",
+            foreground="#555",
+        ).pack(anchor="w", pady=(0, 6))
+
+        mid = ttk.Frame(outer)
+        mid.pack(fill="both", expand=True)
+
+        cols = ("enabled", "match", "pattern", "answer", "note")
+        heads = {"enabled": ("启用", 50), "match": ("匹配", 60), "pattern": ("题目（文本/正则）", 300),
+                 "answer": ("答案", 220), "note": ("备注", 240)}
+        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
+        for c in cols:
+            text, width = heads[c]
+            self.tree.heading(c, text=text)
+            self.tree.column(c, width=width, anchor="w", stretch=(c in ("pattern", "answer", "note")))
+        vsb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="left", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected())
+
+        # 编辑区
+        form = ttk.LabelFrame(outer, text="新增 / 修改", padding=8)
+        form.pack(fill="x", pady=(8, 4))
+        self.var_match = tk.StringVar(value="text")
+        self.var_pattern = tk.StringVar()
+        self.var_answer = tk.StringVar()
+        self.var_note = tk.StringVar()
+
+        ttk.Label(form, text="匹配方式").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(form, textvariable=self.var_match, width=8, state="readonly",
+                     values=["text", "regex", "expr"]).grid(row=0, column=1, sticky="w", padx=(4, 12))
+        ttk.Label(form, text="题目文字/正则").grid(row=0, column=2, sticky="w")
+        ttk.Entry(form, textvariable=self.var_pattern, width=42).grid(row=0, column=3, sticky="we", padx=(4, 12))
+        ttk.Label(form, text="答案").grid(row=0, column=4, sticky="w")
+        ttk.Entry(form, textvariable=self.var_answer, width=22).grid(row=0, column=5, sticky="we", padx=4)
+        ttk.Label(form, text="备注").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(form, textvariable=self.var_note, width=30).grid(row=1, column=1, columnspan=3,
+                                                                  sticky="we", padx=(4, 12), pady=(6, 0))
+        form.columnconfigure(3, weight=1)
+        form.columnconfigure(5, weight=1)
+
+        btns = ttk.Frame(outer)
+        btns.pack(fill="x", pady=(4, 4))
+        for text, cmd in (
+            ("新增规则", self._add),
+            ("保存修改", self._update_selected),
+            ("删除规则", self._remove_selected),
+            ("启用/停用", self._toggle_selected),
+            ("重新载入", self._reload),
+            ("保存到文件", self._save),
+            ("清理未配置占位规则", self._clean_placeholders),
+        ):
+            ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=3)
+        ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
+
+        # 未命中题目
+        pend = ttk.LabelFrame(outer, text="答案库未命中的题目（可复制题干后新增规则）", padding=6)
+        pend.pack(fill="both", expand=False)
+        self.pending_text = tk.Text(pend, height=7, wrap="word", bg="#fffdf5")
+        self.pending_text.pack(fill="both", expand=True)
+        ttk.Button(pend, text="把选中的题干填入上方『题目文字』", command=self._use_pending).pack(anchor="e", pady=(4, 0))
+
+        self._refresh()
+        self.grab_set()
+
+    # ------------------------------------------------------------------ #
+    def _refresh(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for rule in self.bank.rules:
+            self.tree.insert("", "end", iid=rule.id, values=(
+                "是" if rule.enabled else "否", rule.match,
+                rule.pattern, str(rule.answer), rule.note,
+            ))
+        from .answers import load_pending
+
+        pending = load_pending()
+        self.pending_text.configure(state="normal")
+        self.pending_text.delete("1.0", "end")
+        if not pending:
+            self.pending_text.insert("1.0", "（暂无。运行任务后未命中的题目会自动记录到这里）")
+        for it in pending:
+            self.pending_text.insert("end", f"[{it.get('qtype','')}] {it.get('question','')}\n")
+            if it.get("options"):
+                self.pending_text.insert("end", "     选项: " + " / ".join(
+                    str(o.get("label")) for o in it["options"][:10]) + "\n")
+        self.pending_text.configure(state="disabled")
+
+    def _selected_rule(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        for rule in self.bank.rules:
+            if rule.id == sel[0]:
+                return rule
+        return None
+
+    def _load_selected(self) -> None:
+        rule = self._selected_rule()
+        if rule:
+            self.var_match.set(rule.match)
+            self.var_pattern.set(rule.pattern)
+            self.var_answer.set(str(rule.answer))
+            self.var_note.set(rule.note)
+
+    def _add(self) -> None:
+        pattern = self.var_pattern.get().strip()
+        if not pattern:
+            messagebox.showwarning("缺少题目", "请先填写题目文字或正则表达式。", parent=self)
+            return
+        answer = self.var_answer.get().strip()
+        if not answer and self.var_match.get() != "expr":
+            messagebox.showwarning("缺少答案", "请填写答案（expr 匹配方式不需要）。", parent=self)
+            return
+        try:
+            self.bank.add_rule(pattern, answer, match=self.var_match.get(), note=self.var_note.get().strip())
+        except Exception as exc:
+            messagebox.showerror("规则无效", f"{type(exc).__name__}: {exc}", parent=self)
+            return
+        self.bank.save()
+        self.app.scheduler.reload_bank()
+        self._refresh()
+        self.app._log_line(f"答案库已新增规则：{pattern}")
+
+    def _update_selected(self) -> None:
+        rule = self._selected_rule()
+        if rule is None:
+            return
+        rule.match = self.var_match.get()
+        rule.pattern = self.var_pattern.get().strip()
+        rule.answer = self.var_answer.get().strip()
+        rule.note = self.var_note.get().strip()
+        if rule.match == "regex":
+            import re as _re
+
+            try:
+                rule._regex = _re.compile(rule.pattern, _re.I)
+            except _re.error as exc:
+                messagebox.showerror("正则无效", str(exc), parent=self)
+                return
+        elif rule.match == "text":
+            import re as _re
+
+            rule._regex = _re.compile(_re.escape(rule.pattern), _re.I)
+        self.bank.save()
+        self.app.scheduler.reload_bank()
+        self._refresh()
+        self.app._log_line(f"答案库已更新规则：{rule.pattern}")
+
+    def _remove_selected(self) -> None:
+        rule = self._selected_rule()
+        if rule is None:
+            return
+        if not messagebox.askyesno("删除规则", f"确定删除规则「{rule.pattern}」？", parent=self):
+            return
+        self.bank.remove_rule(rule.id)
+        self.bank.save()
+        self.app.scheduler.reload_bank()
+        self._refresh()
+
+    def _toggle_selected(self) -> None:
+        rule = self._selected_rule()
+        if rule is None:
+            return
+        rule.enabled = not rule.enabled
+        self.bank.save()
+        self.app.scheduler.reload_bank()
+        self._refresh()
+
+    def _reload(self) -> None:
+        from .answers import AnswerBank
+
+        self.bank = AnswerBank.load()
+        self._refresh()
+
+    def _save(self) -> None:
+        self.bank.save()
+        self.app.scheduler.reload_bank()
+        self.app._log_line(f"答案库已保存到 {self.bank.path}")
+        messagebox.showinfo("已保存", f"答案库已保存：\n{self.bank.path}", parent=self)
+
+    def _clean_placeholders(self) -> None:
+        removed = [r for r in self.bank.rules if isinstance(r.answer, str) and r.answer.startswith("未配置")]
+        if not removed:
+            messagebox.showinfo("无需清理", "没有未配置的占位规则。", parent=self)
+            return
+        if not messagebox.askyesno("清理占位规则", f"删除 {len(removed)} 条尚未配置答案的示例规则？", parent=self):
+            return
+        for r in removed:
+            self.bank.remove_rule(r.id)
+        self.bank.save()
+        self.app.scheduler.reload_bank()
+        self._refresh()
+
+    def _use_pending(self) -> None:
+        try:
+            sel = self.pending_text.get("sel.first", "sel.last")
+        except tk.TclError:
+            messagebox.showinfo("提示", "请先在下面的列表里选中一段题干文字。", parent=self)
+            return
+        line = sel.strip().lstrip("[").split("]", 1)
+        text = (line[1] if len(line) > 1 else sel).strip()
+        self.var_pattern.set(text[:200])
+        self.var_match.set("text")
 
 
 # --------------------------------------------------------------------------- #
@@ -476,7 +755,8 @@ class MainWindow(tk.Tk):
             ("⏻ 启用/停用", self.toggle_task),
             ("▶ 立即执行", self.run_task_now),
             ("↗ 打开网址", self.open_url),
-            ("🧪 测试填写", self.test_fill),
+            ("🧪 预演(不提交)", self.preview_task),
+            ("📚 答案库", self.open_bank),
             ("⚙ 设置", self.open_settings),
             ("⤓ 托盘运行", self.hide_to_tray),
         ]
@@ -609,6 +889,13 @@ class MainWindow(tk.Tk):
                 self._log_line(f"{symbol} {ev.get('task_name')}：{ev.get('message')}", color)
             elif kind == "task_skipped":
                 self._log_line(f"— 跳过 {ev.get('task_name')}：{ev.get('reason')}")
+            elif kind == "unresolved":
+                self._log_line(f"❓ {ev.get('task_name')}：{ev.get('message')}", WARN_COLOR)
+            elif kind == "preview":
+                color = OK_COLOR if ev.get("ok") else BAD_COLOR
+                self._log_line(f"🔍 预演结果（{ev.get('task_name')}）：", color)
+                for line in str(ev.get("report", "")).splitlines():
+                    self._log_line("    " + line, color)
             elif kind == "notify":
                 self._log_line(f"🔔 {ev.get('title')}：{ev.get('message')}", WARN_COLOR)
             elif kind == "error":
@@ -789,6 +1076,30 @@ class MainWindow(tk.Tk):
             return
         self._log_line(f"🧪 测试填写：{task.name}")
         self.scheduler.run_now(task)
+
+    def preview_task(self) -> None:
+        """预演：读取题目 + 检索答案库，展示将会填写的内容（不提交）。"""
+        task = self.selected_task()
+        if task is None:
+            return
+        self._log_line(f"🔍 预演：{task.name}（读取题目并检索答案库）")
+
+        def worker() -> None:
+            from . import autorun
+
+            try:
+                res = autorun.probe_questions(self.cfg, task.url, prefer_browser=True,
+                                              bank=self.scheduler.answer_bank())
+                self.events.put({"kind": "preview", "task_name": task.name,
+                                 "report": res.report(), "ok": res.ok,
+                                 "unresolved": [q.label for q in res.unresolved]})
+            except Exception as exc:
+                self.events.put({"kind": "error", "message": f"{type(exc).__name__}: {exc}"})
+
+        threading.Thread(target=worker, name="wjx-preview", daemon=True).start()
+
+    def open_bank(self) -> None:
+        BankDialog(self)
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self)

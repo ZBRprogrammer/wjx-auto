@@ -56,6 +56,17 @@ BLOCKED_PATTERNS: Sequence[str] = (
     "无权访问",
 )
 
+# 安全校验 / 验证码（问卷星的阿里云验证码：needLoadAliVerify）
+CAPTCHA_PATTERNS: Sequence[str] = (
+    "需要安全校验",
+    "安全校验",
+    "请重新提交",
+    "请完成验证",
+    "滑动验证",
+    "点击完成验证",
+    "验证码",
+)
+
 
 class DriverError(RuntimeError):
     """后端不可用或执行异常。"""
@@ -107,6 +118,13 @@ def classify_post_submit(
     for pat in FULL_PATTERNS:
         if pat and pat in blob:
             return RunResult.FULL.value, f"检测到提示：{_snippet(blob, pat)}"
+
+    # 安全校验（阿里云验证码）：必须先人工完成验证，否则不可能提交成功
+    for pat in CAPTCHA_PATTERNS:
+        if pat and pat in blob:
+            return RunResult.CAPTCHA.value, (
+                f"问卷触发安全校验，需要人工完成验证码：{_snippet(blob, pat)}"
+            )
 
     navigated = bool(url_after) and _norm(url_after) != _norm(url_before)
     if success_url_hint and url_after and success_url_hint.lower() in url_after.lower():

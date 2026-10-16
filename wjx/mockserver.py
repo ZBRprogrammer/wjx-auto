@@ -35,58 +35,43 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_PORT = 8765
 
 # --------------------------------------------------------------------------- #
-# 问卷定义：A 为"稳成功"，B 为"可能人数已满"，用于演示条件与优先级
+# 问卷定义：题目文案与默认答案库（wjx/answers.py）配套，
+# 这样离线也能完整演示"按题目内容检索答案"。
 # --------------------------------------------------------------------------- #
+def _q1(label: str = "1. 你更倾向哪一种方案？") -> Dict[str, Any]:
+    return {
+        "key": "q1",
+        "label": label,
+        "type": "radio",
+        "required": True,
+        "options": [
+            {"value": "1", "label": "方案一"},
+            {"value": "2", "label": "方案二"},
+            {"value": "3", "label": "方案三"},
+        ],
+    }
+
+
+def _q2(label: str = "2. 请填写你的默认备注") -> Dict[str, Any]:
+    return {"key": "q2", "label": label, "type": "text", "required": True, "options": []}
+
+
+def _q3(label: str = "3. 11-4") -> Dict[str, Any]:
+    return {"key": "q3", "label": label, "type": "text", "required": True, "options": []}
+
+
 SURVEYS: Dict[str, Dict[str, Any]] = {
     "A": {
         "title": "问卷A（演示：正常可提交）",
         "full_rate": 0.0,          # 人数已满的概率
         "capacity": 5000,
-        "fields": [
-            {
-                "key": "q1",
-                "label": "1. 你更倾向哪一种方案？",
-                "type": "radio",
-                "required": True,
-                "options": [
-                    {"value": "1", "label": "方案一"},
-                    {"value": "2", "label": "方案二"},
-                    {"value": "3", "label": "方案三"},
-                ],
-            },
-            {
-                "key": "q2",
-                "label": "2. 请填写你的默认备注",
-                "type": "text",
-                "required": True,
-                "options": [],
-            },
-        ],
+        "fields": [_q1(), _q2(), _q3()],
     },
     "B": {
         "title": "问卷B（演示：可能提示填写人数过多）",
         "full_rate": 0.4,
         "capacity": 5000,
-        "fields": [
-            {
-                "key": "q1",
-                "label": "1. 你更倾向哪一种方案？",
-                "type": "radio",
-                "required": True,
-                "options": [
-                    {"value": "1", "label": "方案一"},
-                    {"value": "2", "label": "方案二"},
-                    {"value": "3", "label": "方案三"},
-                ],
-            },
-            {
-                "key": "q2",
-                "label": "2. 请填写你的默认备注",
-                "type": "text",
-                "required": True,
-                "options": [],
-            },
-        ],
+        "fields": [_q1(), _q2(), _q3()],
     },
 }
 
