@@ -449,16 +449,28 @@ dist/wjx-auto/                              绿色版目录（免安装，整个
 
 ### 安装包行为
 
+> **双击即弹 UAC**：安装包**外壳**的清单已改为 `requireAdministrator`（做法见
+> `tools/patch_inno_launcher.py`），Windows 在启动安装包的第一时间就会弹提权确认 ——
+> 这发生在 Inno 自解包之前，因此不会再出现
+> 「无法创建目录 …\Temp\is-XXXX.tmp / 错误 5: 拒绝访问」（那个错误是非管理员时
+> 自解包写临时目录被拦导致的，光设 `PrivilegesRequired=admin` 解决不了，因为提权请求
+> 发生在自解包之后）。**程序日常运行不需要管理员权限。**
+>
+> 仍然装不上时的备选：解压 `*-portable.zip` 直接用绿色版（完全不依赖临时目录），
+> 或把用户环境变量 `TEMP`/`TMP` 指到可写目录（如 `D:\Temp`）后再运行安装包。
+
 | 项目 | 说明 |
 | --- | --- |
-| 权限 | **默认请求管理员权限**（启动即弹 UAC，点「是」继续）。原因：部分个人电脑的安全软件/受控文件夹访问会连 `%TEMP%\is-XXXX.tmp` 都拦，非管理员时安装程序在解包阶段就报「错误 5: 拒绝访问」。**程序本身日常运行不需要管理员权限** |
-| 安装位置 | 管理员模式默认 `C:\Program Files\wjx-auto`（向导里可改）；`/CURRENTUSER` 时装到 `%LOCALAPPDATA%\wjx-auto` |
-| 运行期目录权限 | 安装时自动给 `data` / `logs` / `run` / `.selenium-cache` 授予「所有用户：修改」权限（`Permissions: users-modify`），这样**普通用户运行也能写**；程序本体仍只读 |
-| 数据位置回落 | 若安装位置对当前用户不可写（例如手工拷进 Program Files），程序启动时会自动改用 `%LOCALAPPDATA%\wjx-auto`，并写一份「数据位置说明.txt」 |
-| 安装方式 | Inno Setup 的 LZMA2 **解包安装**（不是单文件每次启动解包） |
+| 权限 | 安装包外壳 `requireAdministrator` + 脚本 `PrivilegesRequired=admin`：启动即弹 UAC，确认后全程管理员权限。程序本身运行时用普通权限即可 |
+| 安装位置 | 管理员模式默认 `C:\Program Files\wjx-auto`（向导里可改）；`/CURRENTUSER` 装到 `%LOCALAPPDATA%\wjx-auto` |
+| 运行期目录权限 | 安装时给 `data` / `logs` / `run` / `.selenium-cache` 授予「所有用户：修改」（`Permissions: users-modify`），普通用户运行也能写；程序本体仍只读 |
+| 数据位置回落 | 若安装位置对当前用户不可写（例如手工拷进 Program Files），程序启动时自动改用 `%LOCALAPPDATA%\wjx-auto`，并写一份「数据位置说明.txt」 |
+| 早期探针 | 向导创建后写「`桌面\wjx-auto-安装探针.txt`」（是否管理员 / TEMP 可写性 / 安装目录可写性），便于判定"提权有没有生效" |
+| 自诊断 | `setup.exe /TESTDIRS` 导出各目录可写性报告，不安装任何东西 |
 | 快捷方式 | 开始菜单：主程序 / 命令行 / 环境自检 / 使用说明 / 卸载；可选桌面图标与「预演本卷」 |
-| 可选任务 | ① 桌面快捷方式 ② **开机自动后台运行**（HKCU Run 项，命令行为 `wjx-auto-gui.exe --minimized`，启动即收进托盘） |
+| 可选任务 | ① 桌面快捷方式 ② **开机自动后台运行**（HKCU Run 项，`wjx-auto-gui.exe --minimized`，启动即收进托盘） |
 | 数据保留 | `data\` 标了 `uninsneveruninstall` + `onlyifdoesntexist`：升级与卸载都不覆盖/不删除 |
+| 外壳补丁 | `tools/patch_inno_launcher.py`（`--check` / `--restore` / 构建时自动调用）：把 Inno 安装目录里 `SetupLdr.e32/e64` 的清单等长替换为 `requireAdministrator`（**文件大小逐字节不变**，否则 Inno 会拒绝使用）；因改过预编译文件，`.iss` 里按官方文档设 `DisablePrecompiledFileVerifications=setupldr` |
 | 语言 | 简体中文（`packaging/languages/ChineseSimplified.isl`）+ 英文 |
 
 打包要点（`packaging/` 目录）：

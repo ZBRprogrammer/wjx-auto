@@ -170,7 +170,12 @@ def build_portable_zip() -> int:
 
 
 def build_installer(skip_build: bool = False) -> int:
-    """用 Inno Setup 打包安装程序（setup 解包安装）。"""
+    """用 Inno Setup 打包安装程序（setup 解包安装）。
+
+    编译前会确保安装包**外壳**已带 requireAdministrator 清单 ——
+    否则双击时 Windows 不会弹 UAC，遇到临时目录被拦就会报
+    「无法创建目录 …\\Temp\\is-XXXX.tmp / 错误 5」（详见 tools/patch_inno_launcher.py）。
+    """
     dist = ROOT / "dist" / "wjx-auto"
     if not skip_build and not (dist / "wjx-auto-gui.exe").exists():
         print("未找到 dist/wjx-auto，请先构建 onedir 版本")
@@ -187,6 +192,13 @@ def build_installer(skip_build: bool = False) -> int:
               "  choco install innosetup -y\n"
               "安装后重新运行本脚本，或设置环境变量 ISCC 指向 ISCC.exe。")
         return 1
+
+    # 关键：给安装包外壳打上"要求管理员权限"的清单，Windows 才会在启动时弹 UAC
+    patch_launcher = ROOT / "tools" / "patch_inno_launcher.py"
+    if patch_launcher.exists():
+        print("确保安装包外壳带 requireAdministrator 清单 …")
+        subprocess.call([sys.executable, str(patch_launcher)], cwd=str(ROOT),
+                        stdout=subprocess.DEVNULL)
 
     SETUP_OUT.mkdir(parents=True, exist_ok=True)
     cmd = [iscc, f"/DMyAppVersion={app_version()}", str(ISS)]

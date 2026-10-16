@@ -46,6 +46,23 @@ DisableProgramGroupPage=yes
 ; 仍然保留 /CURRENTUSER 开关：高级用户可以以当前用户身份静默安装（按用户目录）。
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=commandline
+
+; ---------------------------------------------------------------------------
+; 让安装包**外壳**也要求管理员权限（真正的"运行前就弹 UAC"）
+;
+; 背景：Inno 生成的 setup.exe = 自解压外壳(SetupLdr) + 负载。外壳的清单默认是
+; asInvoker，而它必须先把自身解包到 %TEMP%\is-XXXX.tmp —— 若该目录被安全软件/
+; 受控文件夹访问拦住，就会在"申请提权之前"报
+; 「安装程序无法创建目录 …\Temp\is-XXXX.tmp / 错误 5: 拒绝访问」（连 UAC 都不弹）。
+;
+; 解决：用 tools/patch_inno_launcher.py 把 Inno 安装目录里的 SetupLdr.e32/e64
+; 清单改成 requireAdministrator（逐字节等长替换，文件大小不变；原文件有备份，
+; --restore 可还原）。之后 ISCC 编译出的 setup.exe 外壳就带 requireAdministrator，
+; Windows 会在启动安装包的第一时间弹 UAC，确认后全程管理员权限，临时目录写入不再受限。
+;
+; 因为改过预编译文件（SetupLdr），签名校验必然不通过，按官方文档关闭该校验。
+; 取值需写明是哪一类文件：Inno 6.7 起 setupldre32/setupldre64 合并为 setupldr。
+DisablePrecompiledFileVerifications=setupldr
 ; 解包安装（压缩安装包内容）
 Compression=lzma2/max
 SolidCompression=yes
@@ -304,6 +321,40 @@ end;
 // 本安装包默认以管理员权限运行（启动时弹 UAC），因此正常情况下不会走到这里；
 // 若用户显式用 /CURRENTUSER 以普通权限运行、且临时目录确实不可写，
 // 就提前拦住并给出可执行的建议。
+// 早期探针：把当前进程的权限状态写到固定位置。
+// 用途：当安装连"解包临时目录"都建不出来时，日志文件本身也写不到临时目录，
+// 这个探针会告诉排查者"提权到底有没有发生"。
+//   写了 → 安装程序成功跑到代码阶段（提权生效或本就不需要提权）
+//   没写 → 连这一步都没到（提权没发生 / 安全软件拦截了进程）
+//
+// 注意调用时机：InitializeSetup 里 {app} 与 WizardForm 都还不存在，
+// 所以本函数只能在 InitializeWizard（或更晚）调用。
+procedure WriteEarlyProbe();
+var
+  Probe: String;
+  Text: String;
+  Target: String;
+begin
+  Target := WizardDirValue;
+  Text := 'wjx-auto 安装早期探针' + #13#10 +
+          '时间: ' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + #13#10 +
+          '安装包版本: {#MyAppVersion}' + #13#10 +
+          '是否管理员: ' + BoolText(IsAdmin) + #13#10 +
+          '管理安装模式: ' + BoolText(IsAdminInstallMode) + #13#10 +
+          'TEMP: ' + ExpandConstant('{tmp}') + #13#10 +
+          'TEMP 可写: ' + BoolText(DirLooksWritable(ExpandConstant('{tmp}'))) + #13#10 +
+          '安装目录: ' + Target + #13#10 +
+          '安装目录可写: ' + BoolText(DirLooksWritable(Target)) + #13#10;
+  Probe := ExpandConstant('{userdesktop}') + '\wjx-auto-安装探针.txt';
+  if not SaveStringToFile(Probe, Text, False) then
+  begin
+    Probe := ExpandConstant('{src}\wjx-auto-安装探针.txt');
+    SaveStringToFile(Probe, Text, False);
+  end;
+  Log('--- 早期探针（InitializeWizard 之后）---');
+  Log(Text);
+end;
+
 function InitializeSetup(): Boolean;
 var
   TmpOk: Boolean;
@@ -368,7 +419,8 @@ var
   Pref: String;
 begin
   // 向导里用户改过目录、或命令行传了 /DIR，就尊重它
-  if not IsUninstaller then
+  // （InitializeWizard 之前 WizardForm 还不存在，所以只在它建好后读 WizardDirValue）
+  if (not IsUninstaller) and (WizardForm <> nil) then
   begin
     Pref := WizardDirValue;
     if (Pref <> '') and DirExists(Pref) and DirLooksWritable(Pref) then
@@ -393,6 +445,8 @@ begin
   Dir := PickWritableDir();
   if Dir <> '' then
     WizardForm.DirEdit.Text := Dir;
+  // 此刻 WizardForm 已创建、{app} 可用，适合写"提权有没有生效"的探针
+  WriteEarlyProbe();
 end;
 
 // 进入"准备安装"前拦一下：目标目录不可写就明确告诉用户怎么改
