@@ -200,13 +200,27 @@ def clean_label(text: str) -> str:
 # 静态解析（HTTP + BeautifulSoup）
 # --------------------------------------------------------------------------- #
 def parse_questions_html(html: str) -> List[Question]:
-    try:
-        from bs4 import BeautifulSoup  # type: ignore
-    except ImportError:  # pragma: no cover
-        log.warning("未安装 beautifulsoup4，无法静态解析题目；请用 probe --browser 或安装 bs4")
-        return []
+    """解析静态 HTML 中的题目。
 
-    soup = BeautifulSoup(html, "html.parser")
+    默认用项目内置解析器（wjx/htmlparse.py，纯标准库）——这样打包成 exe 时
+    不需要携带 beautifulsoup4+lxml（约 30MB）。若本机装了 bs4，可用环境变量
+    ``WJX_USE_BS4=1`` 切回 bs4 做对照排查。
+    """
+    import os
+
+    if os.environ.get("WJX_USE_BS4") == "1":
+        try:
+            from bs4 import BeautifulSoup  # type: ignore
+
+            soup = BeautifulSoup(html, "html.parser")
+        except ImportError:
+            from .htmlparse import Soup as soup  # type: ignore
+
+            soup = soup(html)
+    else:
+        from .htmlparse import Soup
+
+        soup = Soup(html)
 
     containers: List[Any] = []
     used_selector = ""

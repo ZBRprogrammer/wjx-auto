@@ -227,8 +227,19 @@ class Scheduler:
 
     def _maybe_prepare(self, task: Task, start: datetime, now: datetime) -> None:
         """真实后端：到"提前 prepare_minutes 分钟"时先把页面打开（后台预加载）。"""
-        if not task.preopen or self.cfg.settings.backend == "mock":
+        if not task.preopen:
             return
+        # 必须按**解析后**的后端判断：backend=auto 时 mock 网址解析为 mock 后端，
+        # 若只比较配置里的 "mock" 字符串，就会为模拟问卷启动真实浏览器
+        # （实测会拉起十几个 msedge 进程）。
+        try:
+            from .drivers import resolve_backend
+
+            if resolve_backend(self.cfg.settings, task.url) != "selenium":
+                return
+        except Exception:
+            if self.cfg.settings.backend != "selenium":
+                return
         prepare_at = start - timedelta(minutes=max(1, int(task.prepare_minutes)))
         if now < prepare_at:
             return

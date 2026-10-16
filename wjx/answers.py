@@ -485,20 +485,18 @@ class AnswerBank:
 # 默认规则
 # --------------------------------------------------------------------------- #
 def default_rules() -> List[AnswerRule]:
-    """出厂规则：算术题自动计算 + 一题一规则的占位示例。
+    """出厂规则：算术题自动计算 + 两条例题（与内置模拟问卷配套，开箱即可跑通）。
 
-    ``answer`` 以 ``"未配置"`` 开头时会被视为"尚未配置"（confidence 40），
-    这样可以直观看到答案库的用法，又不会把占位文本当成真答案悄悄提交。
+    ``answer`` 以 ``"未配置"`` 开头时会被视为"尚未配置"（confidence 40 且不参与提交），
+    这样既能直观看到答案库用法，又不会把占位文本当成真答案发出去。
     """
     raw = [
         {"id": "arith", "match": "expr", "pattern": "arithmetic", "answer": "",
          "note": "四则运算等算术题：自动计算题目算式"},
-        {"id": "example-text", "match": "regex", "pattern": "请填写你的默认备注",
-         "answer": "未配置：请在答案库中把本题的答案改成你要填的内容",
-         "note": "示例：按题目文字匹配（把 answer 改成自己的答案即生效）"},
         {"id": "example-choice", "match": "regex", "pattern": "你更倾向哪一种方案",
-         "answer": "方案一",
-         "note": "示例：单选题直接写选项文字（也可写序号 1）"},
+         "answer": "方案一", "note": "示例：单选题直接写选项文字（也可写序号 1）"},
+        {"id": "example-text", "match": "regex", "pattern": "请填写你的默认备注",
+         "answer": "答案库自动填写", "note": "示例：填空题答案"},
     ]
     return [AnswerRule.from_dict(r) for r in raw]
 

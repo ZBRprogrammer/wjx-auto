@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -38,7 +39,8 @@ DEFAULT_PORT = 8765
 # 问卷定义：题目文案与默认答案库（wjx/answers.py）配套，
 # 这样离线也能完整演示"按题目内容检索答案"。
 # --------------------------------------------------------------------------- #
-def _q1(label: str = "1. 你更倾向哪一种方案？") -> Dict[str, Any]:
+def _q1(label: str = "你更倾向哪一种方案？") -> Dict[str, Any]:
+    """题干与默认答案库的示例规则一致（不含题号，与真实问卷星一致）。"""
     return {
         "key": "q1",
         "label": label,
@@ -52,11 +54,11 @@ def _q1(label: str = "1. 你更倾向哪一种方案？") -> Dict[str, Any]:
     }
 
 
-def _q2(label: str = "2. 请填写你的默认备注") -> Dict[str, Any]:
+def _q2(label: str = "请填写你的默认备注") -> Dict[str, Any]:
     return {"key": "q2", "label": label, "type": "text", "required": True, "options": []}
 
 
-def _q3(label: str = "3. 11-4") -> Dict[str, Any]:
+def _q3(label: str = "11-4") -> Dict[str, Any]:
     return {"key": "q3", "label": label, "type": "text", "required": True, "options": []}
 
 
@@ -124,41 +126,56 @@ code{background:#f3f4f6;padding:2px 6px;border-radius:4px}
 
 def render_form(sid: str, action: str, errors: List[str] = (), prefill: Dict[str, str] = None,
                 alert_text: str = "") -> str:
+    """渲染答题页。
+
+    刻意**模仿真实问卷星模板**（fieldset + div.field[data-role=fieldcontain] +
+    div.topichtml + input[name=qN]），这样内置解析器在离线自测时就被同一套逻辑验证。
+    """
     prefill = prefill or {}
     rows = []
-    for f in (_survey(sid) or {}).get("fields", []):
+    survey = _survey(sid) or {}
+    for i, f in enumerate(survey.get("fields", []), start=1):
         key, ftype = f["key"], f["type"]
         current = prefill.get(key, "")
-        opts = []
+        req = ' req="1"' if f.get("required") else ""
+        options_html = []
         if ftype == "radio":
             for o in f["options"]:
                 checked = " checked" if current == str(o["value"]) else ""
-                opts.append(
-                    f'<label class="opt"><input type="radio" name="{key}" value="{o["value"]}"{checked}> '
-                    f'{o["label"]}</label>'
+                options_html.append(
+                    f'<label class="opt"><input type="radio" name="{key}" '
+                    f'value="{o["value"]}"{checked}/> {o["label"]}</label>'
                 )
-            control = "".join(opts)
+            control = "".join(options_html)
         elif ftype == "checkbox":
             chosen = set(str(current).split(",")) if current else set()
             for o in f["options"]:
                 checked = " checked" if str(o["value"]) in chosen else ""
-                opts.append(
-                    f'<label class="opt"><input type="checkbox" name="{key}" value="{o["value"]}"{checked}> '
-                    f'{o["label"]}</label>'
+                options_html.append(
+                    f'<label class="opt"><input type="checkbox" name="{key}" '
+                    f'value="{o["value"]}"{checked}/> {o["label"]}</label>'
                 )
-            control = "".join(opts)
+            control = "".join(options_html)
         else:
             cls = ' class="missing"' if f["label"] in errors else ""
-            control = f'<input type="text" name="{key}" value="{current}"{cls}>'
-        rows.append(
-            f'<div class="field"><div class="field-label">{f["label"]}'
-            f'{" <span style=color:#e53935>*</span>" if f.get("required") else ""}</div>{control}</div>'
-        )
+            control = f'<input type="text" id="{key}" name="{key}" value="{current}"{cls}/>'
+
+        req_star = '<span class="req">*</span>' if f.get("required") else ""
+        rows.append(f"""
+      <div class="field ui-field-contain" id="div{i}" topic="{i}"{req} type="1"
+           data-role="fieldcontain">
+        <div class="field-label">{req_star}<div class="topicnumber">{i}.</div>
+          <div class="topichtml">{f["label"]}</div></div>
+        <div class="ui-input-text">{control}</div>
+        <div class="errorMessage"></div>
+      </div>""")
+
     alert_html = (
-        f'<div id="alert">{alert_text}</div>' if alert_text else '<div id="alert" class="hidden"></div>'
+        f'<div id="alert">{alert_text}</div>' if alert_text
+        else '<div id="alert" class="hidden"></div>'
     )
     err_html = f'<div class="err">提交失败：{"；".join(errors)}</div>' if errors else ""
-    title = (_survey(sid) or {}).get("title", sid)
+    title = survey.get("title", sid)
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>{title}</title>
 <style>{PAGE_CSS}</style></head>
@@ -167,8 +184,10 @@ def render_form(sid: str, action: str, errors: List[str] = (), prefill: Dict[str
 <div class="sub">模拟问卷 · 由 wjx-auto mockserver 提供 · 编号 {sid.upper()}</div>
 {alert_html}
 <form method="post" action="{action}">
+<fieldset class="fieldset" id="fieldset1">
 {''.join(rows)}
-<button type="submit" id="submit_button">提交</button>
+</fieldset>
+<div id="SubmitBtnGroup"><div id="ctlNext" class="submitbtn mainBgColor">提交</div></div>
 {err_html}
 </form>
 <div class="sub" style="margin-top:20px">提示：在网址后加 <code>?force=full</code> /
@@ -346,6 +365,51 @@ def create_server(port: int = DEFAULT_PORT, host: str = "127.0.0.1") -> Threadin
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     return httpd
+
+
+def ensure_running(settings: Any, port: Optional[int] = None) -> bool:
+    """确保模拟问卷服务在运行；没有再就地起一个**进程内线程**版本。
+
+    为什么不用子进程：打包成 exe 后没有 ``main.py`` 可执行，子进程方式会失败。
+    进程内线程版对 GUI/命令行都适用，且不占额外内存。
+    """
+    import urllib.request
+
+    base = str(getattr(settings, "mock_base_url", "") or "").rstrip("/")
+    if "127.0.0.1" not in base and "localhost" not in base:
+        return False
+    try:
+        with urllib.request.urlopen(f"{base}/stats", timeout=1.5) as resp:
+            resp.read(64)
+        return True                       # 已经在跑（可能是其它进程起的）
+    except Exception:
+        pass
+
+    host = "127.0.0.1"
+    if port is None:
+        port = DEFAULT_PORT
+        tail = base.rsplit("/", 1)[-1]
+        if ":" in tail:
+            try:
+                port = int(tail.rsplit(":", 1)[-1].strip("/"))
+            except ValueError:
+                port = DEFAULT_PORT
+    try:
+        httpd = create_server(port, host)
+    except OSError as exc:
+        print(f"模拟问卷服务启动失败（端口 {port} 可能被占用）: {exc}", file=sys.stderr)
+        return False
+    threading.Thread(target=httpd.serve_forever, name="wjx-mock", daemon=True).start()
+    for _ in range(20):
+        time.sleep(0.15)
+        try:
+            with urllib.request.urlopen(f"{base}/stats", timeout=1.5) as resp:
+                resp.read(64)
+            print(f"模拟问卷服务已在本进程内启动: http://{host}:{port}/vm/A.aspx")
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def main(argv: Optional[List[str]] = None) -> int:

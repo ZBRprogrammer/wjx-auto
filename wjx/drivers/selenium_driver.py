@@ -40,6 +40,18 @@ from .base import (
     _match_option,
 )
 
+# 浏览器可执行文件默认位置（用于环境自检）
+BROWSER_PATHS: Dict[str, Sequence[str]] = {
+    "edge": (
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ),
+    "chrome": (
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ),
+}
+
 # 题目容器选择器（按优先级）
 CONTAINER_SELECTORS: Sequence[str] = (
     'div.field[data-role="fieldcontain"]',

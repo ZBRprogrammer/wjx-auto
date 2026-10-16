@@ -415,12 +415,68 @@ wjx-auto/
 
 ---
 
-## 10. 版本管理
+## 10. 打包成可执行文件
+
+```bat
+python tools\build_exe.py                :: onedir（推荐分发）
+python tools\build_exe.py --onefile      :: 额外产出单文件 exe
+python tools\build_exe.py --clean        :: 先清空 build\ 与 dist\
+```
+
+产物 `dist/wjx-auto/`（约 116 MB）：
+
+```
+wjx-auto-gui.exe     图形界面，双击即用（无控制台窗口）
+wjx-auto.exe         命令行版（selftest / probe / fill / autostart / daemon / bank …）
+使用说明.txt          给使用者的快速上手 + 常见问题
+_internal/           Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
+```
+
+分发方式：**整个 `dist/wjx-auto` 文件夹**拷给别人，双击 `wjx-auto-gui.exe` 即可。
+运行后会在 exe 同级生成 `data\`（任务/答案库）、`logs\`、`run\`；配置跟着文件夹走，
+升级时只替换 exe 与 `_internal\`，`data\` 不会被覆盖。
+
+打包要点（`packaging/` 目录）：
+
+| 文件 | 作用 |
+| --- | --- |
+| `wjx-auto.spec` | 一次构建两个 exe（GUI 无控制台 + CLI 有控制台），共用同一份依赖，体积几乎不翻倍 |
+| `wjx-auto-onefile.spec` | 单文件便携版 |
+| `common.py` | 收集规则：只带 selenium 及其运行依赖；排除 numpy/pandas/matplotlib，省下上百 MB |
+| `使用说明.txt` | 随包分发的用户文档 |
+
+其它实现细节：
+
+* **路径**：`wjx/paths.py` 检测 `sys.frozen`，只读资源取 `_MEIPASS`，可写数据取 exe 同级目录
+  （若 exe 目录不可写，如装在 `Program Files`，自动回落到 `%LOCALAPPDATA%\wjx-auto`）。
+* **HTML 解析**：改用项目内置的 `wjx/htmlparse.py`（纯标准库），因此不必打包
+  beautifulsoup4 + lxml（省约 30 MB）；`probe --static` 在打包版里照常可用。
+* **模拟问卷服务**：打包后没有 `main.py` 可执行，改为在本进程内用线程启动
+  （`mockserver.ensure_running`），GUI / demo / run 都能正常拉起。
+* **驱动**：只把 `drivers/*.exe` 打进 `_internal/drivers/`（跳过 11 MB 的 zip）；
+  用户也可把匹配自己浏览器版本的驱动放到 exe 同级 `drivers\`，查找顺序见
+  `paths.find_bundled_driver()`。
+* **自检**：`wjx-auto.exe check-env` 报告运行方式、可写目录、tkinter、内置解析器、
+  selenium、浏览器与驱动、网络、答案库与任务数量 —— 换机器后先跑它就够定位问题。
+
+实测（打包版，非源码）：
+
+```
+wjx-auto.exe selftest   → 99 项全部通过
+wjx-auto.exe check-env  → 环境就绪 ✔（selenium 4.51 + 内置 Edge 驱动）
+wjx-auto.exe probe --url https://v.wjx.cn/vm/xx.aspx  → 真实无头 Edge 读出 5 道题
+wjx-auto-gui.exe        → 窗口正常打开，且不会为模拟问卷误启真实浏览器
+```
+
+---
+
+## 11. 版本管理
 
 仓库使用 git 规范管理，历史提交按功能拆分。
 重新克隆后运行：
 
 ```bat
-python main.py selftest    :: 应全部 PASS（66 项）
+python main.py selftest    :: 应全部 PASS（99 项）
 python main.py demo        :: 两个场景均通过
+python tools\build_exe.py  :: 重新打包 exe
 ```

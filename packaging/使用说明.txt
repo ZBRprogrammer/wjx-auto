@@ -1,0 +1,83 @@
+wjx-auto · 问卷星定时自动填写助手（免安装版）
+====================================================================
+
+一、怎么运行
+------------
+双击  wjx-auto-gui.exe    → 打开图形界面（推荐）
+双击  wjx-auto.exe        → 命令行版（会弹出黑色窗口，可跑各种命令）
+
+首次运行会在本目录自动生成：
+    data\tasks.json          任务配置
+    data\answer_bank.json    默认答案库（题目 → 答案 规则）
+    data\pending_questions.json  答案库里没找到的题目
+    logs\wjx.log             运行日志
+    run\                     运行期临时文件
+
+整个文件夹可以任意拷贝/移动，配置跟着文件夹走。升级时只替换 exe 与 _internal，
+data\ 目录里的东西不会被覆盖。
+
+二、三步开始用
+--------------
+1) 打开界面 → 「＋ 新建任务」：填任务名称、问卷网址、开始时间
+   （时间留空也可以，之后再补；或先用命令行 autostart 自动推导开放时间）
+2) 维护答案库 → 「📚 答案库」：按题目内容添加「题目 → 答案」规则
+   · 匹配方式 text：题目文字包含这段字就算命中（最常用）
+   · 匹配方式 regex：正则匹配
+   · 匹配方式 expr：算术题自动计算（pattern 固定填 arithmetic）
+   · 四则运算题（如 11-4、5*8）无需登记，程序会自动算
+3) 到点前 5 分钟会弹窗+响铃提醒；到点自动读题→检索答案→填写提交
+
+三、命令行常用命令（wjx-auto.exe）
+----------------------------------
+  wjx-auto.exe check-env                环境自检（换机器先跑这个）
+  wjx-auto.exe selftest                 内置自测（94 项）
+  wjx-auto.exe list                     查看任务
+  wjx-auto.exe probe   --url <问卷网址>             只读题+检索答案，不提交
+  wjx-auto.exe resolve --url <问卷网址>             预演：显示将会填写的内容
+  wjx-auto.exe fill    --url <问卷网址>             真实填写并提交
+  wjx-auto.exe autostart --url <问卷网址> --name 名称
+                                        没有开始时间的问卷：自动从页面推导开放时间，
+                                        等到点后自动填写提交
+  wjx-auto.exe daemon                   后台静默运行（到点自动执行）
+  wjx-auto.exe bank show                查看答案库
+  wjx-auto.exe bank add --pattern "姓名" --answer "张三"
+  wjx-auto.exe learn --url <问卷网址>    交互式为未命中的题目补答案
+  wjx-auto.exe mock-stop                停止自动拉起的模拟问卷服务
+
+加 --headed 可以看到浏览器窗口（排查问题时有用）：
+  wjx-auto.exe fill --url <问卷网址> --headed
+
+四、连接真实问卷星需要什么
+--------------------------
+本包已内置 selenium 与 Edge 驱动（_internal\drivers\msedgedriver.exe）。
+· 驱动版本必须与本机 Edge 版本匹配；不匹配时请到
+  https://developer.microsoft.com/microsoft-edge/tools/webdriver/ 下载对应版本，
+  替换 drivers\msedgedriver.exe（放在 exe 同级 drivers\ 目录即可，优先于内置的）
+· 用 Chrome 的话，把 chromedriver.exe 放到 drivers\ 目录，
+  并在「设置 → 浏览器」里选 chrome
+
+五、常见问题
+------------
+Q: 提示"问卷尚未开放"？
+A: 该问卷设置了定时开放。程序会自动等待重试；也可先用
+   autostart 自动推导开放时间并生成任务。
+
+Q: 提交失败提示"填写人数过多"？
+A: 问卷已满员。可在任务里设置"人数已满时重试次数/间隔"。
+
+Q: 提示"需要安全校验"？
+A: 问卷开启了验证码。程序不会绕过验证码，请改用人机模式
+   （设置里关闭"无头模式"，或命令行加 --headed）手动完成一次。
+
+Q: 某道题答案库没命中，提交被拦下？
+A: 界面「📚 答案库」→ 下方"未命中的题目"里能看到题干，
+   复制题干作为规则内容、填上答案即可；或运行 learn 命令交互补充。
+
+Q: 删除会不会误删其它规则？
+A: 不会。删除只按 id 精确删除一条；支持 Ctrl/Shift 多选、Ctrl+A 全选、
+   Delete 键批量删除，删除前会弹窗逐条列出并要求确认（默认焦点在"取消"）。
+
+六、隐私与安全
+--------------
+答案库里的姓名、学号、电话等内容都只存在本机 data\answer_bank.json，
+不会上传到任何服务器。请勿把该文件随分发内容一起给别人。

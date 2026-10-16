@@ -285,6 +285,104 @@ def _execute_task(cfg: AppConfig, task: Task, bank, args) -> int:
     return 0 if rec.result == "success" else 1
 
 
+def cmd_check_env(args) -> int:
+    """环境自检：打包/换机器后先跑这个，确认缺什么。"""
+    import platform
+
+    from wjx import paths
+
+    paths.setup_environment()
+    ok = True
+    print("=" * 66)
+    print("wjx-auto 环境自检")
+    print("=" * 66)
+    print(f"Python      : {platform.python_version()} ({platform.machine()})")
+    print(f"运行方式    : {'打包 exe' if paths.is_frozen() else '源码'}")
+    print(f"数据目录    : {paths.ROOT}")
+    print(f"资源目录    : {paths.BUNDLE_DIR}")
+
+    # 可写性
+    for name in ("data", "logs", "run"):
+        d = paths.ROOT / name
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".write_test"
+            probe.write_text("x", encoding="utf-8")
+            probe.unlink()
+            print(f"  {name:6} 可写 ✔  {d}")
+        except Exception as exc:
+            ok = False
+            print(f"  {name:6} 不可写 ✘  {d} ({exc})")
+
+    # tkinter
+    try:
+        import tkinter
+
+        print(f"tkinter     : 可用 ✔ (Tk {tkinter.TkVersion})")
+    except Exception as exc:
+        ok = False
+        print(f"tkinter     : 不可用 ✘ {exc}")
+
+    # 内置解析器
+    try:
+        from wjx.htmlparse import Soup
+
+        Soup("<div class='field'><input name='q1'/></div>").select("div.field")
+        print("HTML 解析   : 内置解析器可用 ✔")
+    except Exception as exc:
+        ok = False
+        print(f"HTML 解析   : 失败 ✘ {exc}")
+
+    # selenium
+    try:
+        import selenium
+
+        print(f"selenium    : 可用 ✔ {selenium.__version__}")
+    except Exception as exc:
+        print(f"selenium    : 不可用 ✘ {exc}（只能使用 mock 后端）")
+
+    # 浏览器与驱动
+    cfg = config_mod.load_config(getattr(args, "config", None))
+    for browser in ("edge", "chrome"):
+        exe = _browser_path(browser)
+        driver = paths.find_bundled_driver(browser, strict=True)
+        status = [f"浏览器 {'✔' if exe else '✘'}", f"驱动 {'✔' if driver else '✘'}"]
+        print(f"{browser:11} : {'  '.join(status)}"
+              + (f"  {driver}" if driver else "  （未找到驱动，可放到 drivers/ 目录）"))
+    print(f"默认后端    : {cfg.settings.backend} / 浏览器 {cfg.settings.browser}"
+          f" / 无头 {cfg.settings.headless}")
+
+    # 网络（能否访问问卷星）
+    try:
+        from wjx.questionnaire import fetch_html
+
+        fetch_html("https://v.wjx.cn/vm/mYv3i3D.aspx", timeout=12)
+        print("网络访问    : 可访问问卷星 ✔")
+    except Exception as exc:
+        print(f"网络访问    : 失败 ✘ {type(exc).__name__}: {exc}")
+
+    # 答案库 / 任务
+    from wjx.answers import AnswerBank
+
+    bank = AnswerBank.load()
+    print(f"答案库      : {len(bank.rules)} 条规则  {bank.path}")
+    print(f"任务        : {len(cfg.tasks)} 个")
+    print("=" * 66)
+    print("结论：" + ("环境就绪 ✔" if ok else "存在问题，请按上面提示处理 ✘"))
+    return 0 if ok else 1
+
+
+def _browser_path(browser: str) -> str:
+    import os as _os
+
+    from wjx.drivers.selenium_driver import BROWSER_PATHS
+
+    for path in BROWSER_PATHS.get(browser, ()):
+        if _os.path.exists(path):
+            return path
+    return ""
+
+
 def cmd_learn(args) -> int:
     """交互式补答案：读取问卷题目，对未命中的题目逐个询问并写入答案库。"""
     cfg = _load(args)
@@ -634,44 +732,20 @@ def _soon(minutes: int) -> str:
 
 def _ensure_mock_server(cfg: AppConfig, port: Optional[int] = None,
                         pid_name: str = "mock.pid") -> bool:
-    """GUI/daemon/run/demo 启动时若模拟服务未运行则自动拉起（仅当配置指向本地 mock 地址）。
+    """确保模拟问卷服务可用。
 
-    子进程以分离会话方式启动并写 PID 文件，避免随调用方退出而结束。
+    * 已经有人（本进程/别的进程）在跑 → 直接返回 True；
+    * 否则**在本进程内起一个线程版**服务（打包成 exe 后没有 main.py 可执行，
+      原子进程方案在冻结环境里会失败）。
+
+    ``port`` 可显式指定（demo 用 8799 与正式环境隔离）。
     """
+    from wjx import mockserver
+
     base = cfg.settings.mock_base_url or ""
     if "127.0.0.1" not in base and "localhost" not in base:
         return False
-    if manualtest.check_mock_server(cfg.settings):
-        return True
-    try:
-        if port is None:
-            port = 8765
-            tail = base.rsplit("/", 1)[-1]
-            if ":" in tail:
-                try:
-                    port = int(tail.rsplit(":", 1)[-1].strip("/"))
-                except ValueError:
-                    port = 8765
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        proc = subprocess.Popen(
-            [sys.executable, str(paths.ROOT / "main.py"), "mock", "--port", str(port)],
-            cwd=str(paths.ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
-        try:
-            (paths.RUN_DIR / pid_name).write_text(str(proc.pid), encoding="utf-8")
-        except OSError:
-            pass
-        for _ in range(24):
-            time.sleep(0.25)
-            if manualtest.check_mock_server(cfg.settings):
-                return True
-    except Exception as exc:
-        print(f"启动模拟问卷服务失败: {exc}", file=sys.stderr)
-    return False
+    return mockserver.ensure_running(cfg.settings, port=port)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -768,6 +842,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", default=None, choices=["auto", "mock", "selenium"])
     p.add_argument("--browser", default=None, choices=["edge", "chrome"])
     p.set_defaults(func=cmd_autostart)
+
+    p = sub.add_parser("check-env", help="环境自检（打包后/换机器先跑这个）", parents=[common])
+    p.set_defaults(func=cmd_check_env)
 
     p = sub.add_parser("learn", help="交互式为未命中的题目补答案（写入答案库）", parents=[common])
     p.add_argument("--url", default="", help="问卷网址；省略则处理 pending 列表")

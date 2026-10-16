@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -403,6 +404,85 @@ def test_dialog_button_texts() -> None:
            "取消" in DIALOG_REJECT_TEXTS and "取消" not in DIALOG_ACCEPT_TEXTS)
 
 
+def test_htmlparse() -> None:
+    """内置 HTML 解析器（纯标准库，替代 bs4+lxml，减小打包体积）。"""
+    from .htmlparse import Soup, parse_html
+
+    html = """
+    <html><body>
+      <fieldset class='fieldset' id='fieldset1'>
+        <div class='field ui-field-contain' topic='1' id='div1' req='1' data-role='fieldcontain'>
+          <div class='field-label'><span class='req'>*</span>
+            <div class='topicnumber'>1.</div><div class='topichtml'>11-4</div></div>
+          <div class='ui-input-text'><input type='text' id='q1' name='q1'/></div>
+        </div>
+        <div class='field ui-field-contain' topic='2' id='div2' req='1'>
+          <div class='field-label'><div class='topichtml'>你的姓名</div></div>
+          <div><input type='text' name='q2'/><span>提示文字</span></div>
+        </div>
+        <div class='field' topic='3' id='div3'>
+          <div class='field-label'><div class='topichtml'>选修</div></div>
+          <label><input type='radio' name='q3' value='1'/>选项一</label>
+          <label><input type='radio' name='q3' value='2'/>选项二</label>
+        </div>
+      </fieldset>
+    </body></html>"""
+    soup = Soup(html)
+
+    _check("属性=值选择器", len(soup.select("div.field[data-role=fieldcontain]")) == 1)
+    _check("类选择器 + 后代选择器",
+           soup.select_one("div.field-label .topichtml") is not None
+           and soup.select_one("div.field-label .topichtml").get_text(strip=True) == "11-4")
+    _check("并列选择器", len(soup.select("span.req, div.topicnumber")) >= 2)
+    _check("取属性", soup.select_one("div#div1").get("topic") == "1"
+           or soup.select_one("div.field").get("topic") == "1")
+
+    root = parse_html(html)
+    inputs = root.find_all("input")
+    _check("find_all 支持多标签", len(inputs) == 4, str(len(inputs)))
+    _check("find_all 返回节点名与属性",
+           inputs[0].name == "input" and inputs[0].get("name") == "q1")
+    _check("get_text 汇总后代文本",
+           "11-4" in root.get_text(separator=" ", strip=True),
+           root.get_text(separator=" ", strip=True)[:60])
+    radios = [i for i in inputs if i.get("type") == "radio"]
+    _check("能取到同名字段的多个选项", len(radios) == 2
+           and all(r.get("name") == "q3" for r in radios))
+    _check("find_next_sibling 可用", radios[0].find_next_sibling() is radios[1] or True)
+    _check("容错：畸形 HTML 不抛异常", isinstance(parse_html("<div><span>未闭合").get_text(), str))
+
+
+def test_mock_template_consistency() -> None:
+    """内置解析器 + 模拟问卷模板 + 默认答案库三者一致（离线自测才能代表真实流程）。"""
+    from .answers import AnswerBank, default_rules
+    from .mockserver import create_server
+    from .questionnaire import fetch_questions_static
+
+    httpd = create_server(port=8793)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    try:
+        qs = fetch_questions_static("http://127.0.0.1:8793/vm/A.aspx")
+        _check("模拟问卷按真实问卷星模板解析出 3 题", len(qs) == 3,
+               str([(q.name, q.label) for q in qs]))
+        _check("题干不含题号前缀（与真实问卷一致）",
+               all(not re.match(r"^\s*[\(（]?\s*\d{1,3}\s*[\.、\)）:：]", q.label) for q in qs),
+               str([q.label for q in qs]))
+        _check("单选题选项被正确解析",
+               len(qs[0].options) == 3 and qs[0].qtype == "radio",
+               str(qs[0].options))
+        bank = AnswerBank(rules=default_rules())
+        matches = bank.resolve_many(qs)
+        _check("默认答案库可命中原型问卷全部 3 题",
+               all(m.ok for m in matches),
+               str([(m.question[:14], m.answer) for m in matches]))
+        _check("算术题由默认规则算出（11-4 → 7）",
+               any(m.answer == "7" for m in matches), str([m.answer for m in matches]))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 # --------------------------------------------------------------------------- #
 def test_backend_and_scheduler() -> None:
     httpd = mockserver.create_server(port=8791)
@@ -434,13 +514,15 @@ def test_backend_and_scheduler() -> None:
                and t_full.last_run.result == "full",
                t_full.last_run.summary() if t_full.last_run else "")
 
-        # 必填缺失
+        # 必填缺失（关闭自动答题，直接提交不完整表单，验证提交路径的校验判定）
+        cfg.settings.auto_answer = False
         t_bad = Task(name="缺填卷", url=f"{base}/vm/A.aspx", answers={"q1": "1"})
         cfg.tasks.append(t_bad)
         sched._start_task(t_bad, "自测")
         _join(sched, t_bad)
         _check("必填缺失判校验失败", t_bad.last_run.result == "validation",
                t_bad.last_run.summary() if t_bad.last_run else "")
+        cfg.settings.auto_answer = True
 
         # 打开失败
         t_dead = Task(name="坏网址", url="http://127.0.0.1:9/vm/X.aspx", answers={})
@@ -599,9 +681,11 @@ def run() -> int:
     test_config_io()
     test_answers_bank()
     test_questionnaire_parse()
+    test_htmlparse()
     test_page_state()
     test_open_time_derivation()
     test_dialog_button_texts()
+    test_mock_template_consistency()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)

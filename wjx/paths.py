@@ -1,4 +1,10 @@
-"""项目内路径统一出口，所有运行期数据都落在项目目录下（便携、免管理员权限）。"""
+"""项目内路径统一出口，所有运行期数据都落在项目目录下（便携、免管理员权限）。
+
+打包成 exe 后（PyInstaller）：
+* ``sys.frozen`` 为真，只读资源在 ``sys._MEIPASS``（onefile 时是临时解包目录）；
+* 可写数据（data/ logs/ run/）放在 **exe 所在目录**旁，保证用户能直接查看/编辑配置、
+  且程序升级换 exe 不会丢数据。
+"""
 
 from __future__ import annotations
 
@@ -8,17 +14,47 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+
+def _detect_root() -> Path:
+    """确定"数据根目录"：源码运行时是项目根，打包后是 exe 所在目录。"""
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        # 优先用 exe 同级目录；不可写（例如装在 Program Files）时退回用户目录
+        if os.access(str(exe_dir), os.W_OK):
+            return exe_dir
+        fallback = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "wjx-auto"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+    return Path(__file__).resolve().parent.parent
+
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def resource_root() -> Path:
+    """只读资源根目录（打包后是解包目录，源码运行时是项目根）。"""
+    if is_frozen():
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return ROOT
+
+
+ROOT = _detect_root()
+BUNDLE_DIR = resource_root()
 
 
 def ensure_vendor_on_path() -> bool:
-    """把项目内 vendor/ 加入模块搜索路径（可选依赖用 pip --target vendor 安装）。"""
-    vendor = ROOT / "vendor"
-    if vendor.is_dir():
-        entry = str(vendor)
-        if entry not in sys.path:
-            sys.path.append(entry)
-        return True
+    """把 vendor/ 加入模块搜索路径（可选依赖用 pip --target vendor 安装）。
+
+    打包成 exe 后依赖已内置，vendor 目录可能不存在，此时直接跳过。
+    """
+    for base in (ROOT, BUNDLE_DIR):
+        vendor = base / "vendor"
+        if vendor.is_dir():
+            entry = str(vendor)
+            if entry not in sys.path:
+                sys.path.append(entry)
+            return True
     return False
 
 
@@ -66,17 +102,37 @@ def ensure_dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
-def find_bundled_driver(browser: str = "edge") -> str:
-    """在项目 drivers/ 目录里找与浏览器匹配的驱动，找不到返回空字符串。"""
+def find_bundled_driver(browser: str = "edge", strict: bool = False) -> str:
+    """查找与本机浏览器匹配的驱动。
+
+    查找顺序：exe/项目同级 ``drivers/`` → 打包内置资源目录 → 同目录直接放驱动。
+    ``strict=True`` 时只认该浏览器自己的驱动名（不拿另一个浏览器的驱动顶替）。
+    """
     names = DRIVER_CANDIDATES.get((browser or "edge").lower(), ())
-    for name in names:
-        candidate = DRIVER_DIR / name
-        if candidate.exists():
-            return str(candidate)
-    if DRIVER_DIR.is_dir():
-        for f in DRIVER_DIR.iterdir():
-            if f.is_file() and f.name.lower().startswith(("msedgedriver", "chromedriver")):
-                return str(f)
+    search_dirs = []
+    for base in (ROOT, BUNDLE_DIR):
+        if base not in search_dirs:
+            search_dirs.append(base)
+    for base in search_dirs:
+        driver_dir = base / "drivers"
+        for name in names:
+            candidate = driver_dir / name
+            if candidate.exists():
+                return str(candidate)
+        # 允许把驱动直接放在 exe 旁边
+        for name in names:
+            candidate = base / name
+            if candidate.exists():
+                return str(candidate)
+    if strict:
+        return ""
+    # 兜底：drivers/ 里有任何驱动就拿去试（selenium-manager 风格）
+    for base in search_dirs:
+        driver_dir = base / "drivers"
+        if driver_dir.is_dir():
+            for f in driver_dir.iterdir():
+                if f.is_file() and f.name.lower().startswith(("msedgedriver", "chromedriver")):
+                    return str(f)
     return ""
 
 
