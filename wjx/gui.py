@@ -377,6 +377,71 @@ def _default_start() -> str:
     return (datetime.now() + timedelta(minutes=10)).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _short(text: str, width: int = 34) -> str:
+    text = str(text).replace("\n", " ")
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def confirm_delete(parent, kind: str, items: List[str], extra: str = "") -> bool:
+    """批量删除确认：列出将要删除的条目，默认焦点在「取消」上。"""
+    if not items:
+        messagebox.showinfo("提示", f"请先选择要删除的{kind}。", parent=parent)
+        return False
+    preview = "\n".join(f"  • {_short(x, 46)}" for x in items[:12])
+    if len(items) > 12:
+        preview += f"\n  … 以及另外 {len(items) - 12} 条"
+    message = (f"即将删除 {len(items)} 个{kind}：\n\n{preview}\n"
+               + (f"\n{extra}\n" if extra else "")
+               + "\n此操作会立即写入配置文件，无法撤销。确定继续吗？")
+    return messagebox.askyesno(f"⚠ 批量删除{kind}", message, parent=parent, default="no")
+
+
+class BatchDeleteDialog(tk.Toplevel):
+    """批量删除的二次确认窗口（比 messagebox 更醒目，默认不删）。"""
+
+    def __init__(self, master, kind: str, items: List[str], extra: str = "", width: int = 54):
+        super().__init__(master)
+        self.confirmed = False
+        self.title(f"⚠ 确认批量删除{kind}")
+        self.transient(master)
+        self.resizable(False, False)
+        self.configure(bg="#fff7f7")
+
+        frame = ttk.Frame(self, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"⚠ 即将删除 {len(items)} 个{kind}",
+                  font=("Microsoft YaHei UI", 11, "bold"), foreground=BAD_COLOR).pack(anchor="w")
+        if extra:
+            ttk.Label(frame, text=extra, foreground="#7a4a00", justify="left",
+                      wraplength=width * 8).pack(anchor="w", pady=(4, 0))
+        box = tk.Text(frame, height=min(12, max(4, len(items))), width=width, wrap="none",
+                      bg="#fffdfd", relief="solid", borderwidth=1)
+        box.pack(fill="both", expand=True, pady=8)
+        for i, item in enumerate(items):
+            box.insert("end", f"{i + 1:>3}. {_short(item, 70)}\n")
+        box.configure(state="disabled")
+        ttk.Label(frame, text="此操作会立即写入配置文件，无法撤销。",
+                  foreground="#666").pack(anchor="w")
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="取消（默认）", command=self._cancel).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text=f"确认删除 {len(items)} 项", command=self._ok).pack(side="right")
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._cancel())      # 回车=取消，防误删
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.grab_set()
+
+    def _ok(self) -> None:
+        self.confirmed = True
+        self.grab_release()
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.confirmed = False
+        self.grab_release()
+        self.destroy()
+
+
 # --------------------------------------------------------------------------- #
 # 设置对话框
 # --------------------------------------------------------------------------- #
@@ -512,7 +577,8 @@ class BankDialog(tk.Toplevel):
         cols = ("enabled", "match", "pattern", "answer", "note")
         heads = {"enabled": ("启用", 50), "match": ("匹配", 60), "pattern": ("题目（文本/正则）", 300),
                  "answer": ("答案", 220), "note": ("备注", 240)}
-        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(mid, columns=cols, show="headings",
+                                 selectmode="extended")   # 支持多选/批量删除
         for c in cols:
             text, width = heads[c]
             self.tree.heading(c, text=text)
@@ -522,6 +588,16 @@ class BankDialog(tk.Toplevel):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="left", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected())
+        # 删除快捷键：Del / BackSpace（默认 Del），支持 Ctrl+A 全选
+        self.tree.bind("<Delete>", lambda _e: self._delete_selected())
+        self.tree.bind("<BackSpace>", lambda _e: self._delete_selected())
+        self.tree.bind("<Control-a>", self._select_all)
+        self.tree.bind("<Button-3>", self._popup_menu)
+        self._menu = tk.Menu(self, tearoff=0)
+        self._menu.add_command(label="删除选中规则 (Del)", command=self._delete_selected)
+        self._menu.add_command(label="全选 (Ctrl+A)", command=lambda: self._select_all(None))
+        self._menu.add_separator()
+        self._menu.add_command(label="启用/停用选中", command=self._toggle_selected)
 
         # 编辑区
         form = ttk.LabelFrame(outer, text="新增 / 修改", padding=8)
@@ -549,16 +625,19 @@ class BankDialog(tk.Toplevel):
         for text, cmd in (
             ("新增规则", self._add),
             ("保存修改", self._update_selected),
-            ("删除规则", self._remove_selected),
+            ("删除选中(Del)", self._delete_selected),
             ("启用/停用", self._toggle_selected),
             ("重新载入", self._reload),
             ("保存到文件", self._save),
+            ("一键去重", self._dedupe),
             ("清理未配置占位规则", self._clean_placeholders),
         ):
             ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=3)
         ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
         self.status = ttk.Label(outer, text="", foreground=OK_COLOR)
         self.status.pack(anchor="w", pady=(0, 4))
+        ttk.Label(outer, text="提示：可按住 Ctrl / Shift 多选，按 Delete 键批量删除；右键有菜单。",
+                  foreground="#666").pack(anchor="w")
 
         # 未命中题目
         pend = ttk.LabelFrame(outer, text="答案库未命中的题目（可复制题干后新增规则）", padding=6)
@@ -698,32 +777,117 @@ class BankDialog(tk.Toplevel):
             messagebox.showerror("保存修改失败", f"{type(exc).__name__}: {exc}", parent=self)
 
     def _remove_selected(self) -> None:
+        """兼容旧入口：现在走批量删除。"""
+        self._delete_selected()
+
+    def _select_all(self, _event=None):
+        self.tree.selection_set(self.tree.get_children())
+        self._say(f"已选中 {len(self.tree.selection())} 条规则")
+        return "break"
+
+    def _popup_menu(self, event) -> None:
+        row = self.tree.identify_row(event.y)
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
         try:
-            rule = self._selected_rule()
-            if rule is None:
-                messagebox.showinfo("提示", "请先在列表中选择要删除的规则。", parent=self)
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu.grab_release()
+
+    def _delete_selected(self) -> None:
+        """批量删除选中规则（Del 快捷键 / 按钮 / 右键菜单）。
+
+        三重保护：
+          1. 只按 id 精确删除，绝不会因 pattern 相同而连带删除其它规则；
+          2. 删除前列出全部将删条目并要求确认（默认选中「取消」）；
+          3. 若某规则正被任务的启动条件引用，另行提示。
+        """
+        try:
+            selected = list(self.tree.selection())
+            if not selected:
+                self._say("没有选中任何规则（可按住 Ctrl/Shift 多选，或 Ctrl+A 全选）", ok=False)
                 return
-            if not messagebox.askyesno("删除规则", f"确定删除规则「{rule.pattern}」？", parent=self):
+            rules = [r for r in (self._rule_by_iid(i) for i in selected) if r is not None]
+            if not rules:
+                self._say("选中的条目已不存在，正在刷新列表", ok=False)
+                self._refresh()
                 return
-            self.bank.remove_rule(rule.id)
+
+            items = [f"[{r.match}] {r.pattern}  →  {r.answer}" for r in rules]
+            extra = ""
+            # 提示：这些规则是否正在被任务条件引用
+            try:
+                expr_blob = " ".join((t.start_rule or "") for t in self.app.cfg.tasks)
+                hit = [r.pattern for r in rules if r.pattern and r.pattern in expr_blob]
+                if hit:
+                    extra = ("注意：以下规则的题目文字出现在任务启动条件里："
+                             + "、".join(hit[:5]) + "，删除后条件可能失效。")
+            except Exception:
+                pass
+
+            dlg = BatchDeleteDialog(self, "答案库规则", items, extra=extra)
+            self.wait_window(dlg)
+            if not dlg.confirmed:
+                self._say("已取消删除")
+                return
+
+            removed = self.bank.remove_rules([r.id for r in rules])
             self.bank.save()
             self.app.scheduler.reload_bank()
             self._refresh()
-            self._say(f"已删除规则：{rule.pattern}")
+            self._say(f"已删除 {removed} 条规则（剩余 {len(self.bank.rules)} 条）")
         except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
             self._say(f"删除失败：{type(exc).__name__}: {exc}", ok=False)
+            messagebox.showerror("删除失败", f"{type(exc).__name__}: {exc}", parent=self)
+
+    def _rule_by_iid(self, iid: str):
+        key = iid.split("#")[0]
+        for rule in self.bank.rules:
+            if rule.id == key:
+                return rule
+        return None
+
+    def _dedupe(self) -> None:
+        """一键去重：把"匹配方式+题目+答案"完全相同的重复规则合并。"""
+        try:
+            groups = self.bank.duplicate_groups()
+            if not groups:
+                self._say("没有发现重复规则")
+                return
+            total = sum(len(g) - 1 for _p, g in groups)
+            items = [f"{p}（{len(g)} 条重复，保留 1 条）" for p, g in groups[:30]]
+            dlg = BatchDeleteDialog(self, "重复规则",
+                                    items, extra=f"共 {len(groups)} 组、将删除 {total} 条重复项。")
+            self.wait_window(dlg)
+            if not dlg.confirmed:
+                self._say("已取消去重")
+                return
+            removed = self.bank.deduplicate()
+            self.bank.save()
+            self.app.scheduler.reload_bank()
+            self._refresh()
+            self._say(f"去重完成：删除 {removed} 条重复规则（剩余 {len(self.bank.rules)} 条）")
+        except Exception as exc:
+            self._say(f"去重失败：{type(exc).__name__}: {exc}", ok=False)
 
     def _toggle_selected(self) -> None:
         try:
-            rule = self._selected_rule()
-            if rule is None:
+            selected = list(self.tree.selection())
+            rules = [r for r in (self._rule_by_iid(i) for i in selected) if r is not None]
+            if not rules:
                 messagebox.showinfo("提示", "请先在列表中选择规则。", parent=self)
                 return
-            rule.enabled = not rule.enabled
+            # 以第一条的状态取反，其余统一跟随（便于批量启用/停用）
+            target = not rules[0].enabled
+            for rule in rules:
+                rule.enabled = target
             self.bank.save()
             self.app.scheduler.reload_bank()
             self._refresh()
-            self._say(f"规则 [{'启用' if rule.enabled else '停用'}]：{rule.pattern}")
+            self._say(f"已{'启用' if target else '停用'} {len(rules)} 条规则")
         except Exception as exc:
             self._say(f"操作失败：{type(exc).__name__}: {exc}", ok=False)
 
@@ -820,7 +984,7 @@ class MainWindow(tk.Tk):
         buttons = [
             ("＋ 新建任务", self.add_task),
             ("✎ 编辑", self.edit_task),
-            ("－ 删除", self.delete_task),
+            ("－ 删除(Del)", self.delete_task),
             ("⏻ 启用/停用", self.toggle_task),
             ("▶ 立即执行", self.run_task_now),
             ("↗ 打开网址", self.open_url),
@@ -845,7 +1009,8 @@ class MainWindow(tk.Tk):
             "countdown": ("倒计时", 110), "group": ("分组", 90), "priority": ("优先级", 60),
             "rule": ("启动条件", 260), "last": ("上次结果", 260),
         }
-        self.tree = ttk.Treeview(top, columns=cols, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(top, columns=cols, show="headings",
+                                 selectmode="extended")   # 支持多选/批量删除
         for c in cols:
             text, width = headings[c]
             self.tree.heading(c, text=text, command=lambda cc=c: self._sort_by(cc))
@@ -856,6 +1021,18 @@ class MainWindow(tk.Tk):
         vsb.pack(side="left", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._show_detail())
         self.tree.bind("<Double-1>", lambda _e: self.edit_task())
+        # 批量删除：Del / BackSpace、Ctrl+A 全选、右键菜单
+        self.tree.bind("<Delete>", lambda _e: self.delete_task())
+        self.tree.bind("<BackSpace>", lambda _e: self.delete_task())
+        self.tree.bind("<Control-a>", self._select_all_tasks)
+        self.tree.bind("<Button-3>", self._popup_menu)
+        self._menu = tk.Menu(self, tearoff=0)
+        self._menu.add_command(label="删除选中任务 (Del)", command=self.delete_task)
+        self._menu.add_command(label="全选 (Ctrl+A)", command=lambda: self._select_all_tasks(None))
+        self._menu.add_separator()
+        self._menu.add_command(label="启用/停用", command=self.toggle_task)
+        self._menu.add_command(label="立即执行", command=self.run_task_now)
+        self._menu.add_command(label="编辑", command=self.edit_task)
         self.tree.tag_configure("success", foreground=OK_COLOR)
         self.tree.tag_configure("failed", foreground=BAD_COLOR)
         self.tree.tag_configure("skipped", foreground="#888")
@@ -1106,14 +1283,64 @@ class MainWindow(tk.Tk):
             self.scheduler.notify_change()
 
     def delete_task(self) -> None:
-        task = self.selected_task()
-        if task is None:
+        """批量删除选中任务（Del 快捷键 / 按钮 / 右键菜单），删除前逐条列出并要求确认。"""
+        selected = list(self.tree.selection())
+        tasks = [self.cfg.find(i) for i in selected]
+        tasks = [t for t in tasks if t is not None]
+        if not tasks:
+            messagebox.showinfo("提示", "请先在任务列表中选择要删除的任务"
+                                        "（可按住 Ctrl/Shift 多选，或 Ctrl+A 全选）。", parent=self)
             return
-        if not messagebox.askyesno("删除任务", f"确定删除「{task.name}」？", parent=self):
+
+        items = []
+        for t in tasks:
+            state = STATUS_TEXT.get(t.status_enum, t.status)
+            items.append(f"{t.name}｜{t.start_at or '仅手动'}｜{state}"
+                         + (f"｜{t.start_rule}" if t.start_rule else ""))
+
+        extra = ""
+        # 若被删任务正被其它任务的启动条件/分组依赖，明确警示
+        remaining = [t for t in self.cfg.tasks if t.id not in {x.id for x in tasks}]
+        expr_blob = " ".join((t.start_rule or "") for t in remaining)
+        group_blob = {t.group for t in remaining if t.group}
+        refs = [t.name for t in tasks if t.name and t.name in expr_blob]
+        group_refs = [t.name for t in tasks if t.group and t.group in group_blob]
+        if refs:
+            extra += "注意：以下任务名出现在其它任务的启动条件里：" + "、".join(refs[:5]) + "。"
+        if group_refs:
+            extra += ("注意：以下任务与其它任务同组，删除会改变『互斥/优先级』行为："
+                      + "、".join(group_refs[:5]) + "。")
+        running = [t.name for t in tasks if self.scheduler.is_running(t.id)]
+        if running:
+            extra += "以下任务正在执行中：" + "、".join(running) + "（删除不会中断当前执行）。"
+
+        dlg = BatchDeleteDialog(self, "任务", items, extra=extra)
+        self.wait_window(dlg)
+        if not dlg.confirmed:
+            self._log_line("已取消删除任务")
             return
-        self.cfg.tasks = [t for t in self.cfg.tasks if t.id != task.id]
+
+        names = [t.name for t in tasks]
+        ids = {t.id for t in tasks}
+        self.cfg.tasks = [t for t in self.cfg.tasks if t.id not in ids]
         self._save_cfg()
-        self._log_line(f"已删除任务：{task.name}")
+        self._log_line(f"已删除 {len(names)} 个任务：{'、'.join(names[:6])}"
+                       + ("…" if len(names) > 6 else ""))
+        self.scheduler.notify_change()
+        self._refresh_once()
+
+    def _select_all_tasks(self, _event=None):
+        self.tree.selection_set(self.tree.get_children())
+        return "break"
+
+    def _popup_menu(self, event) -> None:
+        row = self.tree.identify_row(event.y)
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
+        try:
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu.grab_release()
 
     def toggle_task(self) -> None:
         task = self.selected_task()

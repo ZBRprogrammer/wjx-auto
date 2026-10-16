@@ -143,7 +143,7 @@ def extract_open_datetime(html: str, now: Optional[Any] = None) -> Tuple[str, in
 
 
 def extract_open_time(html: str) -> str:
-    """尽量从提示页里提取开放时间（用于日志与提醒）。"""
+    """尽量从提示页里提取开放时间，统一返回 "YYYY-MM-DD HH:MM"（用于日志与提醒）。"""
     when, _ = extract_open_datetime(html)
     if when:
         return when[:16]

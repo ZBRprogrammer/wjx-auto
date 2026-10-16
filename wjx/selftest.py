@@ -263,6 +263,29 @@ def test_answers_bank() -> None:
            any("你" in r.id or "题" in r.id for r in gui_bank.rules),
            str([r.id for r in gui_bank.rules]))
 
+    # 删除语义：pattern 重名时按 id 删除**只删一条**（历史 bug：会连带删除所有同名规则）
+    bank_del = AnswerBank(rules=[
+        AnswerRule.from_dict({"id": "a1", "match": "text", "pattern": "姓名", "answer": "甲"}),
+        AnswerRule.from_dict({"id": "a2", "match": "text", "pattern": "姓名", "answer": "甲"}),
+        AnswerRule.from_dict({"id": "a3", "match": "regex", "pattern": "姓名", "answer": "甲"}),
+        AnswerRule.from_dict({"id": "b1", "match": "text", "pattern": "学号", "answer": "1"}),
+    ])
+    bank_del.remove_rule("a1")
+    _check("按 id 删除只删一条（重名 pattern 不被连带删除）",
+           [r.id for r in bank_del.rules] == ["a2", "a3", "b1"],
+           str([r.id for r in bank_del.rules]))
+    removed = bank_del.remove_rules(["a2", "a3#2", "不存在"])
+    _check("批量按 id 删除返回实际删除条数", removed == 2 and len(bank_del.rules) == 1,
+           f"removed={removed}")
+
+    dup_bank = AnswerBank(rules=[
+        AnswerRule.from_dict({"id": f"d{i}", "match": "text", "pattern": "班级", "answer": "2606"})
+        for i in range(5)
+    ])
+    _check("识别重复规则组", len(dup_bank.duplicate_groups()) == 1)
+    n = dup_bank.deduplicate()
+    _check("一键去重保留一条", n == 4 and len(dup_bank.rules) == 1, f"removed={n}")
+
     # 题库读写往返
     import shutil
     from pathlib import Path
@@ -322,10 +345,11 @@ def test_page_state() -> None:
 
     not_open_html = """<html><head><title>测试2</title></head><body>
       <div class="wrap"><h2>提示</h2>
-      <p>很抱歉，此问卷将于2026-10-16 16:32（北京时间）开放，请到时再进入此页面进行填写！</p>
-      <p>距离开始还有0天0时9分59秒</p></div></body></html>"""
+      <p>很抱歉，此问卷将于2099-01-01 09:30（北京时间）开放，请到时再进入此页面进行填写！</p>
+      </div></body></html>"""
     _check("识别尚未开放", detect_page_state(not_open_html) == "not_open")
-    _check("提取开放时间", extract_open_time(not_open_html) == "2026-10-16 16:32",
+    _check("提取开放时间（绝对时间，返回 YYYY-MM-DD HH:MM）",
+           extract_open_time(not_open_html) == "2099-01-01 09:30",
            extract_open_time(not_open_html))
     _check("提示页解析不出题目", len(parse_questions_html(not_open_html)) == 0)
 

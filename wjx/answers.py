@@ -350,10 +350,43 @@ class AnswerBank:
         rule = self.add_rule(pattern, answer, match, note, rule_id)
         return rule, len(self.rules) > before
 
-    def remove_rule(self, key: str) -> bool:
+    def remove_rule(self, key: str, by_pattern: bool = False) -> bool:
+        """按 id 删除**一条**规则。
+
+        .. warning::
+           历史实现是 ``r.id != key and r.pattern != key``，当多条规则共用同一 pattern 时
+           （例如答案库里有 18 条 pattern='姓名' 的规则），删一条会把它们**全部删掉** ——
+           用户看到的"删除规则时删掉了其它规则"就是这个原因。现在默认只按 id 精确删除。
+        """
         before = len(self.rules)
-        self.rules = [r for r in self.rules if r.id != key and r.pattern != key]
+        self.rules = [r for r in self.rules if r.id != key]
+        if len(self.rules) == before and by_pattern:
+            self.rules = [r for r in self.rules if r.pattern != key]
         return len(self.rules) != before
+
+    def remove_rules(self, ids: Sequence[str]) -> int:
+        """按 id 批量删除，返回实际删除条数。"""
+        wanted = {i.split("#")[0] for i in ids if i}
+        if not wanted:
+            return 0
+        before = len(self.rules)
+        self.rules = [r for r in self.rules if r.id not in wanted]
+        return before - len(self.rules)
+
+    def duplicate_groups(self) -> List[Tuple[str, List[AnswerRule]]]:
+        """找出"匹配方式 + 题目 + 答案"完全相同的规则组（用于去重）。"""
+        groups: Dict[Tuple[str, str, str], List[AnswerRule]] = {}
+        for rule in self.rules:
+            key = (rule.match, rule.pattern, json.dumps(rule.answer, ensure_ascii=False, sort_keys=True))
+            groups.setdefault(key, []).append(rule)
+        return [(k[1], v) for k, v in groups.items() if len(v) > 1]
+
+    def deduplicate(self) -> int:
+        """保留每组重复规则的第一条，删除其余，返回删除条数。"""
+        remove_ids: List[str] = []
+        for _pattern, group in self.duplicate_groups():
+            remove_ids.extend(r.id for r in group[1:])
+        return self.remove_rules(remove_ids)
 
     def remember(self, question: str, answer: Any, source: str = "") -> None:
         """把"题目原文 -> 答案"记下来，下次顺序变化/字段变化也能命中。"""
