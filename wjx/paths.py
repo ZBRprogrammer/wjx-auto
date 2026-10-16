@@ -15,17 +15,63 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _writable(path: Path) -> bool:
+    """真的往目录里写一个文件来判断可写（比 os.access 可靠，Windows 上尤其）。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_test"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _fallback_root() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(base) / "wjx-auto"
+
+
 def _detect_root() -> Path:
-    """确定"数据根目录"：源码运行时是项目根，打包后是 exe 所在目录。"""
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        # 优先用 exe 同级目录；不可写（例如装在 Program Files）时退回用户目录
-        if os.access(str(exe_dir), os.W_OK):
-            return exe_dir
-        fallback = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "wjx-auto"
+    """确定"数据根目录"。
+
+    * 源码运行 → 项目根目录；
+    * 打包运行 → exe 所在目录；
+    * 但 **管理员模式安装到 Program Files 时，exe 目录对普通用户不可写**，
+      此时自动回落到 ``%LOCALAPPDATA%\\wjx-auto``，否则运行时会到处报权限错误。
+    """
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).resolve().parent.parent
+
+    exe_dir = Path(sys.executable).resolve().parent
+
+    # 已经存在可写的数据目录 → 用它（便携/绿色版、或安装时已放开权限）
+    if exe_dir.is_dir() and _writable(exe_dir / "data"):
+        return exe_dir
+
+    # 回落：优先用户目录（普通权限可写）
+    fallback = _fallback_root()
+    try:
         fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
-    return Path(__file__).resolve().parent.parent
+    except OSError:
+        return exe_dir
+
+    # 首次回落时写一张说明，免得用户找不到数据去哪了
+    marker = fallback / "数据位置说明.txt"
+    if not marker.exists():
+        try:
+            marker.write_text(
+                "程序安装在 " + str(exe_dir) + "（该目录普通用户不可写），\n"
+                "因此任务配置、答案库与日志都保存在本目录：\n"
+                "    " + str(fallback) + "\n\n"
+                "data\\     任务配置与默认答案库\n"
+                "logs\\     运行日志与失败截图\n"
+                "run\\      运行期临时文件\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return fallback
 
 
 def is_frozen() -> bool:

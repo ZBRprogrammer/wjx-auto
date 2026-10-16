@@ -34,8 +34,17 @@ VersionInfoVersion={#MyAppVersion}
 DefaultDirName={localappdata}\{#MyAppDirName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-; 按用户安装（不请求 UAC）。如需装到 Program Files，可用 /ALLUSERS 启动安装包，会正常请求提权。
-PrivilegesRequired=lowest
+; ---------------------------------------------------------------------------
+; 权限策略（按用户实测结论调整）
+;
+; 用户环境（个人电脑 + 安全软件/受控文件夹访问）下，非管理员运行时连
+; %TEMP%\is-XXXX.tmp 都写不进去，安装程序在"解包"阶段就报
+; "安装程序无法创建目录 … 错误 5: 拒绝访问"。而管理员权限下一切正常。
+;
+; 因此：默认就请求提权（安装包启动时弹 UAC），装完再让用户以普通权限使用程序
+;       —— 程序本身运行时不需要管理员权限。
+; 仍然保留 /CURRENTUSER 开关：高级用户可以以当前用户身份静默安装（按用户目录）。
+PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=commandline
 ; 解包安装（压缩安装包内容）
 Compression=lzma2/max
@@ -70,6 +79,15 @@ Source: "..\dist\wjx-auto\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 ; 用户数据目录：只创建空目录，升级时不覆盖已有内容
 Source: "..\packaging\空数据目录说明.txt"; DestDir: "{app}\data"; DestName: "说明.txt"; \
     Flags: onlyifdoesntexist uninsneveruninstall
+
+[Dirs]
+; 管理员模式默认装到 Program Files，而程序运行时是**普通用户权限**，
+; 所以必须把这些运行期要写的目录放开权限，否则运行时会报"拒绝访问"。
+; （程序自身也有回落机制：真的写不了时会改用 %LOCALAPPDATA%\wjx-auto。）
+Name: "{app}\data"; Permissions: users-modify; Flags: uninsneveruninstall
+Name: "{app}\logs"; Permissions: users-modify
+Name: "{app}\run"; Permissions: users-modify
+Name: "{app}\.selenium-cache"; Permissions: users-modify
 
 [Icons]
 ; WIDGET_NO_SHORTCUTS=1 时不创建任何快捷方式（受限环境/无人值守测试用）
@@ -190,13 +208,23 @@ begin
 end;
 
 // 候选安装目录（按可写性依次尝试）。
-// 实测（含受限沙箱）：安装程序解包出的子进程权限比预期更窄，
-// %LOCALAPPDATA% / 文档 / 桌面 都可能被拒，而 %TEMP% 一定可写，
-// 所以候选表里必须有它兜底。
+// 管理员模式下优先系统默认位置；按用户（/CURRENTUSER）时才走用户目录。
 function CandidateDir(Index: Integer): String;
 var
   UserProfile: String;
 begin
+  if IsAdminInstallMode then
+  begin
+    case Index of
+      0: Result := ExpandConstant('{autopf}\{#MyAppDirName}');
+      1: Result := ExpandConstant('{sd}\{#MyAppDirName}');
+      2: Result := ExpandConstant('{localappdata}\{#MyAppDirName}');
+    else
+      Result := '';
+    end;
+    Exit;
+  end;
+
   case Index of
     0: Result := ExpandConstant('{localappdata}\{#MyAppDirName}');
     1: Result := ExpandConstant('{localappdata}\Programs\{#MyAppDirName}');
@@ -272,11 +300,13 @@ end;
 // 关键：Inno 需要先把安装包解包到 %TEMP%\is-XXXX.tmp。
 // 如果这个临时目录不可写（受控文件夹访问 / 杀软拦截会这样），
 // 就会在"安装程序无法创建目录 ...\Temp\is-XXXX.tmp / 错误 5"处直接失败，
-// 连日志文件都写不出来。这里提前发现并给出可执行的建议。
+// 连日志文件都写不出来。
+// 本安装包默认以管理员权限运行（启动时弹 UAC），因此正常情况下不会走到这里；
+// 若用户显式用 /CURRENTUSER 以普通权限运行、且临时目录确实不可写，
+// 就提前拦住并给出可执行的建议。
 function InitializeSetup(): Boolean;
 var
   TmpOk: Boolean;
-  ReportFile: String;
   Answer: Integer;
 begin
   Result := True;
@@ -288,6 +318,10 @@ begin
     Result := False;
     Exit;
   end;
+
+  // 管理员模式（本包默认）下临时目录一定可写，不必打扰
+  if IsAdminInstallMode then
+    Exit;
 
   // 静默安装时不打扰，交给命令行使用者自己判断
   if Pos('SILENT', UpperCase(GetCmdTail)) > 0 then
@@ -301,8 +335,9 @@ begin
       '    ' + ExpandConstant('{tmp}') + #13#10 + #13#10 +
       '常见原因是「Windows 安全中心 → 病毒和威胁防护 → 勒索软件防护（受控文件夹访问）」' + #13#10 +
       '或第三方安全软件（360、火绒、腾讯电脑管家等）拦截了对用户临时目录的写入。' + #13#10 + #13#10 +
-      '可以选择：' + #13#10 +
-      '  · 确定：现在把"目录可写性"诊断报告写到桌面/文档，便于进一步定位；' + #13#10 +
+      '本安装包默认会请求管理员权限；若你刚才用了 /CURRENTUSER，' + #13#10 +
+      '请去掉该参数重新运行（安装包会弹出 UAC 提权，提权后即可正常安装）。' + #13#10 + #13#10 +
+      '  · 确定：现在导出"目录可写性"诊断报告，便于进一步定位；' + #13#10 +
       '  · 取消：使用免安装的绿色版（推荐，完全不依赖临时目录）。',
       mbConfirmation, MB_OKCANCEL);
     if Answer = IDOK then
