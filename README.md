@@ -15,7 +15,7 @@
 ```bat
 cd wjx-auto
 
-:: 一键自测（84 项：规则引擎 / 答案库与算术 / 题目解析 / 页面状态 / 提交判定 / 提醒 / 条件优先级 / 过期保护 / 配置读写）
+:: 一键自测（99 项：规则引擎 / 答案库与算术 / 题目解析 / 页面状态 / 提交判定 / 提醒 / 条件优先级 / 过期保护 / 配置读写）
 python main.py selftest
 
 :: 一键演示 A/B 场景（自动起模拟问卷服务，完全隔离，不动你的配置）
@@ -419,18 +419,26 @@ wjx-auto/
 
 ```bat
 python tools\build_exe.py                :: onedir（推荐分发）
-python tools\build_exe.py --onefile      :: 额外产出单文件 exe
+python tools\build_exe.py --onefile      :: 额外产出两个单文件 exe
 python tools\build_exe.py --clean        :: 先清空 build\ 与 dist\
 ```
 
-产物 `dist/wjx-auto/`（约 116 MB）：
+产物：
 
 ```
-wjx-auto-gui.exe     图形界面，双击即用（无控制台窗口）
-wjx-auto.exe         命令行版（selftest / probe / fill / autostart / daemon / bank …）
-使用说明.txt          给使用者的快速上手 + 常见问题
-_internal/           Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
+dist/wjx-auto/                  （约 116 MB，推荐）
+  wjx-auto-gui.exe              图形界面，双击即用（无控制台窗口）
+  wjx-auto.exe                  命令行版（selftest / probe / fill / autostart / daemon / bank …）
+  使用说明.txt                   给使用者的快速上手 + 常见问题
+  _internal/                    Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱动）
+
+dist/wjx-auto-onefile.exe       （约 51 MB，便携单文件，双击即用）
+dist/wjx-auto-cli-onefile.exe   （约 51 MB，便携单文件，命令行版）
 ```
+
+单文件版每次运行会把资源解包到系统临时目录，启动略慢；**若目标机器的系统临时目录
+不可写**（例如某些受控环境），请改用 onedir 版。命令行操作（selftest/probe/fill…）
+建议用 `wjx-auto.exe` 或 `wjx-auto-cli-onefile.exe`（带控制台，能看到输出）。
 
 分发方式：**整个 `dist/wjx-auto` 文件夹**拷给别人，双击 `wjx-auto-gui.exe` 即可。
 运行后会在 exe 同级生成 `data\`（任务/答案库）、`logs\`、`run\`；配置跟着文件夹走，
@@ -441,7 +449,7 @@ _internal/           Python 运行时 + 依赖（含 selenium 4.51 与 Edge 驱�
 | 文件 | 作用 |
 | --- | --- |
 | `wjx-auto.spec` | 一次构建两个 exe（GUI 无控制台 + CLI 有控制台），共用同一份依赖，体积几乎不翻倍 |
-| `wjx-auto-onefile.spec` | 单文件便携版 |
+| `wjx-auto-onefile.spec` | 单文件便携版（同时产出 GUI 版与命令行版） |
 | `common.py` | 收集规则：只带 selenium 及其运行依赖；排除 numpy/pandas/matplotlib，省下上百 MB |
 | `使用说明.txt` | 随包分发的用户文档 |
 

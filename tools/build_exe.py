@@ -89,6 +89,8 @@ def report() -> None:
     print(f"目录大小：{total / 1024 / 1024:.1f} MB")
     for exe in sorted(dist.glob("*.exe")):
         print(f"  {exe.name:22} {exe.stat().st_size / 1024 / 1024:6.1f} MB")
+    for exe in sorted((ROOT / "dist").glob("*-onefile.exe")):
+        print(f"  {exe.name:22} {exe.stat().st_size / 1024 / 1024:6.1f} MB  (单文件)")
     drivers = dist / "drivers"
     if drivers.is_dir():
         print(f"  内置驱动：{', '.join(p.name for p in drivers.iterdir())}")
