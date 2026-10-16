@@ -29,8 +29,9 @@ AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 VersionInfoVersion={#MyAppVersion}
-; 默认按用户安装到用户自己的目录 —— 这样不需要管理员权限也能装成功
-DefaultDirName={localappdata}\Programs\{#MyAppDirName}
+; 默认按用户安装到用户自己的目录 —— 这样不需要管理员权限也能装成功。
+; 实际默认值会在 InitializeWizard 里按"哪个目录真的能建出来"动态决定。
+DefaultDirName={localappdata}\{#MyAppDirName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; 按用户安装（不请求 UAC）。如需装到 Program Files，可用 /ALLUSERS 启动安装包，会正常请求提权。
@@ -98,43 +99,124 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
 
 // ---------------------------------------------------------------------------
-// 目录可写性检查：非管理员把程序装到 Program Files 之类的位置时，
-// Inno 原来的报错是英文的「Cannot create directory / Error 5」，用户看不懂。
-// 这里在向导阶段就检查，并给出"改成哪个目录"的中文提示。
+// 目录可写性检查
+//
+// 关键点：必须**真正把路径建出来**再验证，而不是只测最近已存在的祖先。
+// 之前只测祖先，导致 %LOCALAPPDATA%\Programs 这种"中间层建不出来"的情况漏过检查，
+// 安装时才由 Inno 抛出英文的「Cannot create directory / Error 5」。
+//
+// 做法：从已存在的祖先开始，一层层 CreateDir 下去（记录新建了哪些），
+// 再写一个临时子目录确认可写，最后把新建的层删掉（只删自己建的）。
 // ---------------------------------------------------------------------------
-// 通过"实际创建并删除一个临时目录"来判断目标位置是否可写。
-// 不用 TFileStream.SaveToFile（Pascal Script 里没有这个方法），
-// 也不依赖任何外部命令，CreateDir/RemoveDir 在 Inno 里是原生支持的。
 function DirLooksWritable(const Dir: String): Boolean;
 var
+  Missing: TArrayOfString;
   Probe, Sub: String;
-  Guard: Integer;
+  Guard, I: Integer;
+  Ok: Boolean;
 begin
   Result := False;
+  if Dir = '' then
+    Exit;
+
+  // 1) 收集"还不存在"的路径层级
+  SetArrayLength(Missing, 0);
   Probe := Dir;
   Guard := 0;
-  // 目录还不存在时，向上找到最近的已存在祖先再试
-  while (Probe <> '') and (not DirExists(Probe)) and (Guard < 32) do
+  while (Probe <> '') and (not DirExists(Probe)) and (Guard < 64) do
   begin
+    SetArrayLength(Missing, GetArrayLength(Missing) + 1);
+    Missing[GetArrayLength(Missing) - 1] := Probe;
     Probe := ExtractFileDir(Probe);
     Guard := Guard + 1;
   end;
   if (Probe = '') or (not DirExists(Probe)) then
     Exit;
 
-  Sub := AddBackslash(Probe) + '.wjx_write_test';
-  if DirExists(Sub) then
-    RemoveDir(Sub);
-  if CreateDir(Sub) then
+  // 2) 真正把它们建出来（下标大的更靠上层，需从上层往下建）
+  Ok := True;
+  for I := GetArrayLength(Missing) - 1 downto 0 do
   begin
-    RemoveDir(Sub);
-    Result := True;
+    if not CreateDir(Missing[I]) then
+    begin
+      Ok := False;
+      Break;
+    end;
   end;
+
+  // 3) 建成了 → 再写一个临时目录确认真的可写
+  if Ok then
+  begin
+    Sub := AddBackslash(Dir) + '.wjx_write_test';
+    if DirExists(Sub) then
+      RemoveDir(Sub);
+    if CreateDir(Sub) then
+    begin
+      RemoveDir(Sub);
+      Result := True;
+    end;
+  end;
+
+  // 4) 清理：只删本次自己建出来的层（从下往上）
+  for I := 0 to GetArrayLength(Missing) - 1 do
+    RemoveDir(Missing[I]);
 end;
 
 function InstallDirHint(): String;
 begin
   Result := ExpandConstant('{localappdata}\Programs\{#MyAppDirName}');
+end;
+
+// 候选安装目录（按可写性依次尝试）。
+// 有些环境的 %LOCALAPPDATA%\Programs（或 LocalAppData 本身被重定向）会被策略
+// 或残留权限挡住，所以不只依赖一个默认值，而是逐个试。
+function CandidateDir(Index: Integer): String;
+begin
+  case Index of
+    0: Result := ExpandConstant('{localappdata}\{#MyAppDirName}');
+    1: Result := ExpandConstant('{localappdata}\Programs\{#MyAppDirName}');
+    2: Result := ExpandConstant('{userappdata}\{#MyAppDirName}');
+    3: Result := ExpandConstant('{userdocs}\{#MyAppDirName}');
+    4: Result := ExpandConstant('{tmp}\{#MyAppDirName}');
+  else
+    Result := '';
+  end;
+end;
+
+// 返回第一个可写候选目录；都不可写则返回空串。
+// 命令行显式给了 /DIR=... 时不要覆盖用户的选择（PrepareToInstall 会再校验并明确报错）。
+function PickWritableDir(): String;
+var
+  I: Integer;
+  Pref: String;
+begin
+  // 向导里用户改过目录、或命令行传了 /DIR，就尊重它
+  if not IsUninstaller then
+  begin
+    Pref := WizardDirValue;
+    if (Pref <> '') and (CompareText(Pref, ExpandConstant('{localappdata}\Programs\{#MyAppDirName}')) <> 0)
+       and DirLooksWritable(Pref) then
+    begin
+      Result := Pref;
+      Exit;
+    end;
+  end;
+  for I := 0 to 4 do
+  begin
+    Result := CandidateDir(I);
+    if (Result <> '') and DirLooksWritable(Result) then
+      Exit;
+  end;
+  Result := '';
+end;
+
+procedure InitializeWizard();
+var
+  Dir: String;
+begin
+  Dir := PickWritableDir();
+  if Dir <> '' then
+    WizardForm.DirEdit.Text := Dir;
 end;
 
 // 进入"准备安装"前拦一下：目标目录不可写就明确告诉用户怎么改
@@ -163,14 +245,27 @@ begin
   end;
 end;
 
-// 安装前最后一道保险：再检查一次，避免向导之后权限又变化
+// 安装前最后一道保险：再检查一次，避免向导之后权限又变化；
+// 同时给出"到底哪个目录失败、还能改哪个"的明确中文说明（替代 Inno 的英文 Error 5）
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Dir, Suggest: String;
 begin
   Result := '';
-  if not DirLooksWritable(WizardDirValue) then
-    Result := '无法写入安装目录：' + WizardDirValue + #13#10 +
-              '请改用当前用户可写的目录（例如 ' + InstallDirHint() + '），' +
-              '或以管理员身份重新运行安装包。';
+  Dir := WizardDirValue;
+  if DirLooksWritable(Dir) then
+    Exit;
+
+  Suggest := PickWritableDir();
+  Result := '无法写入安装目录：' + #13#10 + '    ' + Dir + #13#10 + #13#10 +
+            '原因通常是该目录需要管理员权限，或当前用户对它没有写权限。' + #13#10 + #13#10;
+  if Suggest <> '' then
+    Result := Result + '可以改用这个目录（用户自己的目录，无需管理员权限）：' + #13#10 +
+              '    ' + Suggest + #13#10 + #13#10;
+  Result := Result + '其它办法：' + #13#10 +
+            '  · 点「上一步」回到目录选择页，手动改成上面建议的目录' + #13#10 +
+            '  · 或右键安装包 →「以管理员身份运行」，装到系统目录' + #13#10 +
+            '  · 或直接用免安装的绿色版目录（dist\wjx-auto，拷到任意位置双击 exe 即可）';
 end;
 
 // 开机自启：写注册表 Run 项（比启动文件夹更规范，卸载时也容易清理）
