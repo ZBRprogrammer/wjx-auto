@@ -57,6 +57,53 @@ LABEL_SELECTORS: Sequence[str] = (
 
 NUMBER_PREFIX_RE = re.compile(r"^\s*[\(（]?\s*\d{1,3}\s*[\.、\)）:：]\s*")
 
+# 问卷尚未到开放时间（问卷星"定时开放"）——实测文案：
+#   "很抱歉，此问卷将于2026-10-16 16:32（北京时间）开放，请到时再进入此页面进行填写！"
+#   "距离开始还有0天0时9分59秒"
+NOT_OPEN_STRONG: Sequence[str] = (
+    "开放，请到时再进入", "请到时再进入", "距离开始还有", "尚未开始",
+    "问卷尚未开始", "还未开始", "未到开放时间", "不在开放时间",
+)
+# 问卷已结束 / 停止收集
+CLOSED_PATTERNS: Sequence[str] = (
+    "已结束", "已停止", "停止收集", "问卷已关闭", "不在收集", "已暂停",
+)
+# "将于 <时间> 开放" 形态（时间可以是具体时刻或"倒计时"）
+NOT_OPEN_OPEN_RE = re.compile(r"将于.{0,24}?(?:开放|开始)")
+_DATETIME_RE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}")
+_DHM_RE = re.compile(r"\d+\s*天\s*\d+\s*时\s*\d+\s*分")
+
+
+def detect_page_state(html: str) -> str:
+    """从页面文本判断问卷状态：'not_open' | 'closed' | 'ok' | 'unknown'。
+
+    调用时机：**解析不出任何题目**时，用来区分"尚未开放/已结束"和"解析失败"；
+    有题目的正常页面由调用方直接按 ok 处理。
+    """
+    text = re.sub(r"<script.*?</script>", " ", html or "", flags=re.S | re.I)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    if not text.strip():
+        return "unknown"
+    if any(p in text for p in NOT_OPEN_STRONG):
+        return "not_open"
+    if NOT_OPEN_OPEN_RE.search(text) and (_DATETIME_RE.search(text) or _DHM_RE.search(text)):
+        return "not_open"
+    if any(p in text for p in CLOSED_PATTERNS):
+        return "closed"
+    return "ok"
+
+
+def extract_open_time(html: str) -> str:
+    """尽量从提示页里提取开放时间（用于日志与提醒）。"""
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    m = re.search(r"将于\s*(\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)", text)
+    if m:
+        return m.group(1)
+    m = _DATETIME_RE.search(text)
+    return m.group(0) if m else ""
+
 
 @dataclass
 class Question:
@@ -208,6 +255,11 @@ def _parse_container(c: Any, index: int, selector: str) -> Optional[Question]:
 
 def fetch_questions_static(url: str, timeout: int = 20) -> List[Question]:
     """不启动浏览器，直接取页面解析题目。"""
+    html = fetch_html(url, timeout)
+    return parse_questions_html(html)
+
+
+def fetch_html(url: str, timeout: int = 20) -> str:
     import urllib.error
     import urllib.request
 
@@ -218,10 +270,9 @@ def fetch_questions_static(url: str, timeout: int = 20) -> List[Question]:
     })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            html = resp.read().decode("utf-8", "replace")
+            return resp.read().decode("utf-8", "replace")
     except urllib.error.URLError as exc:
         raise ConnectionError(f"无法打开问卷页面: {exc}") from exc
-    return parse_questions_html(html)
 
 
 # --------------------------------------------------------------------------- #

@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..models import RunResult
@@ -219,6 +220,27 @@ class SeleniumDriver(FillDriver):
         return webdriver, ChromeOptions, ChromeService, EdgeOptions, EdgeService
 
     def _new_browser(self):
+        """启动浏览器；遇到"profile 被上次崩溃残留锁住"时自动清理并重试一次。"""
+        last_error: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                return self._start_browser()
+            except DriverUnavailable as exc:
+                last_error = exc
+                if attempt == 1 and _clean_profile_locks(self._profile_dir()):
+                    log.warning("浏览器启动失败，已清理残留锁文件后重试：%s", str(exc)[:160])
+                    time.sleep(1.5)
+                    continue
+                raise
+        raise DriverUnavailable(str(last_error) if last_error else "浏览器启动失败")
+
+    def _profile_dir(self) -> Path:
+        from ..paths import ROOT
+
+        browser = (getattr(self.settings, "browser", "edge") or "edge").lower()
+        return ROOT / "run" / f"browser-{browser}"
+
+    def _start_browser(self):
         setup_environment()
         webdriver, ChromeOptions, ChromeService, EdgeOptions, EdgeService = self._import_webdriver()
         browser = (getattr(self.settings, "browser", "edge") or "edge").lower()
@@ -287,6 +309,22 @@ class SeleniumDriver(FillDriver):
         except Exception:
             pass
 
+    @staticmethod
+    def is_alive(handle: Any) -> bool:
+        """预打开的浏览器是否仍然可用。
+
+        实测：浏览器被回收/崩溃后句柄还在但 session 已失效，
+        此时必须丢弃句柄重新启动，否则任务会以 driver_error 失败。
+        """
+        if handle is None:
+            return False
+        try:
+            _ = handle.current_url
+            _ = handle.title
+            return True
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------ #
     def submit(self, task: Any, prepared: Any = None,
                answers: Optional[Dict[str, Any]] = None) -> FillOutcome:
@@ -343,7 +381,10 @@ class SeleniumDriver(FillDriver):
             captcha = False
             url_after = driver.current_url
             page_text = ""
-            retries = max(0, int(getattr(self.settings, "submit_retries", 3)))
+            retries = max(0, int(getattr(task, "submit_retries",
+                                         getattr(self.settings, "submit_retries", 3))))
+            retry_delay = float(getattr(task, "submit_retry_delay",
+                                        getattr(self.settings, "submit_retry_delay", 3.0)))
             wait_seconds = max(1, int(getattr(self.settings, "submit_wait_seconds", 6)))
 
             for attempt in range(retries + 1):
@@ -376,9 +417,8 @@ class SeleniumDriver(FillDriver):
                 if not transient or attempt >= retries:
                     break
                 log.info("提交被要求安全校验，%.1fs 后重试（第 %d/%d 次）",
-                         float(getattr(self.settings, "submit_retry_delay", 3.0)),
-                         attempt + 1, retries)
-                time.sleep(float(getattr(self.settings, "submit_retry_delay", 3.0)))
+                         retry_delay, attempt + 1, retries)
+                time.sleep(retry_delay)
 
             try:
                 page_text = driver.find_element(By.TAG_NAME, "body").text or ""
@@ -645,6 +685,20 @@ class SeleniumDriver(FillDriver):
             return str(path)
         except Exception:
             return ""
+
+
+def _clean_profile_locks(profile: Path) -> bool:
+    """删除 Chromium 用户目录里的残留单实例锁（浏览器崩溃后会导致再也起不来）。"""
+    removed = False
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        for path in (profile / name, profile / "Default" / name):
+            try:
+                if path.exists() or path.is_symlink():
+                    path.unlink()
+                    removed = True
+            except OSError:
+                continue
+    return removed
 
 
 def _url_changed(before: str, after: str) -> bool:

@@ -295,6 +295,27 @@ def test_questionnaire_parse() -> None:
                and qs[1].label.startswith("你更倾向"), str(qs[1].to_dict()))
 
 
+def test_page_state() -> None:
+    """问卷星的"定时开放/已结束"提示页识别（真实页面实测文案）。"""
+    from .questionnaire import detect_page_state, extract_open_time, parse_questions_html
+
+    not_open_html = """<html><head><title>测试2</title></head><body>
+      <div class="wrap"><h2>提示</h2>
+      <p>很抱歉，此问卷将于2026-10-16 16:32（北京时间）开放，请到时再进入此页面进行填写！</p>
+      <p>距离开始还有0天0时9分59秒</p></div></body></html>"""
+    _check("识别尚未开放", detect_page_state(not_open_html) == "not_open")
+    _check("提取开放时间", extract_open_time(not_open_html) == "2026-10-16 16:32",
+           extract_open_time(not_open_html))
+    _check("提示页解析不出题目", len(parse_questions_html(not_open_html)) == 0)
+
+    closed_html = "<html><body><p>此问卷已结束，感谢您的参与</p></body></html>"
+    _check("识别已结束", detect_page_state(closed_html) == "closed")
+
+    ok_html = "<html><body><p>程序测试 1. 11-4</p></body></html>"
+    _check("正常页面不误判为未开放/已结束", detect_page_state(ok_html) == "ok")
+    _check("无正文时返回 unknown", detect_page_state("<html><body></body></html>") == "unknown")
+
+
 # --------------------------------------------------------------------------- #
 def test_backend_and_scheduler() -> None:
     httpd = mockserver.create_server(port=8791)
@@ -491,6 +512,7 @@ def run() -> int:
     test_config_io()
     test_answers_bank()
     test_questionnaire_parse()
+    test_page_state()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)

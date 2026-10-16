@@ -355,6 +355,13 @@ def cmd_daemon(args) -> int:
     logger = logging_setup.setup()
     _ensure_mock_server(cfg)
 
+    # 单实例互斥：避免 GUI 与 daemon 同时跑调度器造成重复提交
+    lock = paths.AppLock()
+    if not lock.acquire():
+        print(f"已有调度器在运行（{lock.describe_holder()}），本次不再启动。\n"
+              "如需接管，请先退出那个实例，或删除 run/app.lock 后重试。", file=sys.stderr)
+        return 3
+
     def on_event(ev) -> None:
         kind = ev.get("kind")
         if kind == "task_done":
@@ -363,6 +370,9 @@ def cmd_daemon(args) -> int:
             print(f"[{ev['time']}] ⏰ 提醒 {ev.get('task_name')}：{ev.get('text')}")
         elif kind == "task_skipped":
             print(f"[{ev['time']}] — 跳过 {ev.get('task_name')}：{ev.get('reason')}")
+        elif kind == "backoff":
+            print(f"[{ev['time']}] ⏸ {ev.get('task_name')} 连续失败 {ev.get('streak')} 次，"
+                  f"{ev.get('seconds')} 秒内不再重试")
 
     sched = Scheduler(cfg, on_event=on_event, config_path=getattr(args, "config", None))
     if args.scale and args.scale > 1:
@@ -380,6 +390,7 @@ def cmd_daemon(args) -> int:
         print("\n正在退出…")
     finally:
         sched.stop()
+        lock.release()
         for t in cfg.tasks:
             print(f"  {t.name}: {STATUS_TEXT.get(t.status_enum, t.status)}"
                   + (f" | {t.last_run.summary()}" if t.last_run else ""))

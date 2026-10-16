@@ -37,6 +37,8 @@ class RunResult(str, Enum):
     SUCCESS = "success"                 # 提交后跳转到新页面
     FULL = "full"                       # 弹窗：问卷填写人数过多
     CAPTCHA = "captcha"                 # 触发安全校验（阿里云验证码），需人工完成
+    NOT_OPEN = "not_open"               # 问卷还没到开放时间（问卷星定时开放）
+    CLOSED = "closed"                   # 问卷已结束/已停止收集
     VALIDATION_FAILED = "validation"    # 停留在原页面（必填未通过等）
     UNKNOWN = "unknown"                 # 停留原页但没有识别到弹窗
     BLOCKED = "blocked"                 # 未登录 / 问卷已关闭
@@ -58,6 +60,8 @@ RESULT_TEXT = {
     RunResult.SUCCESS: "提交成功（已跳转）",
     RunResult.FULL: "横幅提示：填写人数过多",
     RunResult.CAPTCHA: "触发安全校验（需人工完成验证码后重试）",
+    RunResult.NOT_OPEN: "问卷尚未到开放时间",
+    RunResult.CLOSED: "问卷已结束/停止收集",
     RunResult.VALIDATION_FAILED: "仍停留原页面（校验未通过）",
     RunResult.UNKNOWN: "仍停留原页面（原因未知）",
     RunResult.BLOCKED: "问卷不可用（已结束/需登录）",
@@ -147,6 +151,8 @@ class Task:
     # 执行策略
     retry_on_full: int = 0         # 遇到"人数过多"后最多重试次数
     retry_interval_seconds: int = 60
+    submit_retries: int = 3        # 提交遇到"需要安全校验，请重新提交"时的重试次数
+    submit_retry_delay: float = 3.0   # 上述重试的间隔（秒）
     submit_after_fill: bool = True
     requires_confirm_after_reminder: bool = False  # 提醒后需人工确认才提交
 

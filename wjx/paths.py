@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -76,6 +78,74 @@ def find_bundled_driver(browser: str = "edge") -> str:
             if f.is_file() and f.name.lower().startswith(("msedgedriver", "chromedriver")):
                 return str(f)
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# 单实例互斥：避免 GUI 与 daemon 同时跑调度器造成重复提交
+# --------------------------------------------------------------------------- #
+class AppLock:
+    """基于"独占创建文件"的跨进程互斥锁（Windows 上 os.open O_EXCL 可靠）。"""
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path or LOCK_FILE
+        self.acquired = False
+        self.holder = ""
+
+    def acquire(self) -> bool:
+        ensure_dirs()
+        payload = f"{os.getpid()}\n{datetime.now().isoformat(timespec='seconds')}\n"
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            self.acquired = True
+            return True
+        except FileExistsError:
+            self.holder = self._read_holder()
+            if self.holder and not _pid_alive(self.holder):
+                # 上一次没退干净：接管这把锁
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+                return self.acquire()
+            return False
+
+    def _read_holder(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError):
+            return ""
+
+    def release(self) -> None:
+        if self.acquired:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+            self.acquired = False
+
+    def describe_holder(self) -> str:
+        pid = self._read_holder()
+        return f"另一个实例（pid={pid}）" if pid else "另一个实例"
+
+
+def _pid_alive(pid: str) -> bool:
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0:
+        return False
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {value}", "/NH"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return str(value) in (out.stdout or "")
+    except Exception:
+        return True     # 判断不了就当作还活着，宁可不抢锁
 
 
 def env_flag(name: str, default: bool = False) -> bool:

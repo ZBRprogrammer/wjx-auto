@@ -20,7 +20,8 @@ from .answers import AnswerBank, Match, record_pending
 from .drivers import DriverError, DriverUnavailable, FillDriver, FillOutcome, create_driver
 from .logging_setup import get_logger
 from .models import AppConfig, RunRecord, RunResult, Task
-from .questionnaire import Question, extract_questions_browser, fetch_questions_static
+from .questionnaire import (Question, extract_questions_browser, fetch_questions_static,
+                            parse_questions_html)
 
 log = get_logger()
 
@@ -31,6 +32,8 @@ class Resolution:
 
     url: str = ""
     source: str = ""                 # browser | static | mock
+    state: str = "ok"                # ok | not_open | closed | unknown
+    open_time: str = ""              # 问卷尚未开放时的开放时间（如 "2026-10-16 16:32"）
     questions: List[Question] = field(default_factory=list)
     matches: List[Match] = field(default_factory=list)
     error: str = ""
@@ -38,7 +41,11 @@ class Resolution:
 
     @property
     def ok(self) -> bool:
-        return not self.error and bool(self.questions)
+        return (not self.error) and self.state == "ok" and bool(self.questions)
+
+    @property
+    def not_open(self) -> bool:
+        return self.state == "not_open"
 
     @property
     def answers(self) -> Dict[str, Any]:
@@ -56,6 +63,11 @@ class Resolution:
         return (len(self.questions) - len(self.unresolved)) / len(self.questions)
 
     def report(self, show_options: bool = True) -> str:
+        if self.state == "not_open":
+            when = f"（开放时间 {self.open_time}）" if self.open_time else ""
+            return f"问卷尚未开放{when}：{self.url}"
+        if self.state == "closed":
+            return f"问卷已结束/停止收集：{self.url}"
         if self.error:
             return f"检索失败（{self.source}）: {self.error}"
         lines = [f"题目来源: {self.source}    共 {len(self.questions)} 题    "
@@ -83,12 +95,18 @@ def _fmt(value: Any) -> str:
 # 题目提取（统一入口）
 # --------------------------------------------------------------------------- #
 def probe_questions(cfg: AppConfig, url: str, prefer_browser: bool = True,
-                    bank: Optional[AnswerBank] = None, driver: Any = None) -> Resolution:
-    """提取题目并检索答案。prefer_browser=True 时用真实浏览器（最准确）。"""
+                    bank: Optional[AnswerBank] = None, driver: Any = None,
+                    html_for_state: str = "") -> Resolution:
+    """提取题目并检索答案。prefer_browser=True 时用真实浏览器（最准确）。
+
+    若问卷还没到开放时间（问卷星定时开放），会返回 state='not_open' 而不是报错，
+    由调用方决定是否等待重试。
+    """
     started = time.time()
     res = Resolution(url=url)
     bank = bank or AnswerBank.load()
     from .drivers import is_mock_url
+    from .questionnaire import detect_page_state, extract_open_time, fetch_html
 
     try:
         if is_mock_url(url, cfg.settings):
@@ -96,7 +114,14 @@ def probe_questions(cfg: AppConfig, url: str, prefer_browser: bool = True,
         elif prefer_browser:
             questions, source = _probe_browser(cfg, url, driver), "browser"
         else:
-            questions, source = fetch_questions_static(url), "static"
+            page = fetch_html(url)
+            res.state = detect_page_state(page)
+            res.open_time = extract_open_time(page) if res.state == "not_open" else ""
+            if res.state in ("not_open", "closed"):
+                res.source = "static"
+                res.elapsed = time.time() - started
+                return res
+            questions, source = parse_questions_html(page), "static"
     except DriverUnavailable as exc:
         res.error = str(exc)
         res.source = "browser"
@@ -110,8 +135,54 @@ def probe_questions(cfg: AppConfig, url: str, prefer_browser: bool = True,
 
     res.source = source
     res.questions = list(questions)
+    if not res.questions:
+        # 没有题目：区分"尚未开放""已结束"和"解析失败"
+        html = html_for_state
+        if not html:
+            try:
+                html = fetch_html(url)
+            except Exception:
+                html = ""
+        if html:
+            res.state = detect_page_state(html)
+            if res.state == "not_open":
+                res.open_time = extract_open_time(html)
+        if res.state == "unknown":
+            res.state = "unknown"
     res.matches = bank.resolve_many(res.questions)
     res.elapsed = time.time() - started
+    return res
+
+
+# 问卷尚未开放时的等待策略
+NOT_OPEN_POLL_SECONDS = 10.0
+NOT_OPEN_MAX_WAIT_SECONDS = 240.0
+
+
+def probe_until_open(cfg: AppConfig, url: str, bank: Optional[AnswerBank] = None,
+                     prefer_browser: bool = True, max_wait: float = NOT_OPEN_MAX_WAIT_SECONDS,
+                     poll: float = NOT_OPEN_POLL_SECONDS,
+                     on_wait: Optional[Any] = None) -> Resolution:
+    """若问卷尚未开放，则每隔 poll 秒重试一次，最多等 max_wait 秒。"""
+    deadline = time.time() + max(0.0, max_wait)
+    attempt = 0
+    while True:
+        attempt += 1
+        res = probe_questions(cfg, url, prefer_browser=prefer_browser, bank=bank)
+        if not res.not_open:
+            return res
+        remaining = deadline - time.time()
+        if remaining <= 1:
+            log.warning("问卷仍未开放（开放时间 %s），已等待到上限", res.open_time or "未知")
+            return res
+        if on_wait:
+            try:
+                on_wait(res, remaining, attempt)
+            except Exception:
+                pass
+        log.info("问卷尚未开放（开放时间 %s），%.0f 秒后重试（第 %d 次，剩余等待 %.0f 秒）",
+                 res.open_time or "未知", poll, attempt, remaining)
+        time.sleep(min(poll, max(0.5, remaining)))
     return res
 
 
@@ -169,9 +240,26 @@ def run_task(cfg: AppConfig, task: Task, bank: Optional[AnswerBank] = None,
     rec.url_before = task.url
 
     res = probe_questions(cfg, task.url, prefer_browser=True, bank=bank, driver=driver)
+    if res.state == "not_open":
+        rec.result = RunResult.NOT_OPEN.value
+        rec.message = res.report()
+        rec.finished_at = _now()
+        if not dry_run:
+            task.record(rec)
+        return rec
+    if res.state == "closed":
+        rec.result = RunResult.CLOSED.value
+        rec.message = res.report()
+        rec.finished_at = _now()
+        if not dry_run:
+            task.record(rec)
+        return rec
     if not res.ok:
-        rec.result = _classify_probe_error(res.error)
-        rec.message = res.error or "未能识别到题目"
+        rec.result = _classify_probe_error(res.error, res.state)
+        rec.message = res.error or (
+            "未能识别到任何题目（页面可能已结束、需登录或模板未适配）"
+            if res.state == "unknown" else "未能识别到题目"
+        )
         rec.finished_at = _now()
         if not dry_run:
             task.record(rec)
@@ -257,7 +345,12 @@ UNREACHABLE_HINTS = (
 )
 
 
-def _classify_probe_error(error: str) -> str:
+def _classify_probe_error(error: str, state: str = "") -> str:
+    """把"读题失败"归类到具体结果，便于条件规则区分处理。"""
+    if state == "not_open":
+        return RunResult.NOT_OPEN.value
+    if state == "closed":
+        return RunResult.CLOSED.value
     text = error or ""
     if any(k in text for k in UNREACHABLE_HINTS):
         return RunResult.NAVIGATION_ERROR.value

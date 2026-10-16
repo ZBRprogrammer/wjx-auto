@@ -727,9 +727,18 @@ class MainWindow(tk.Tk):
         self.configure(bg=BG)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # 单实例互斥：daemon 已在跑调度器时，本窗口只做查看/编辑，不重复执行任务
+        self.lock = paths.AppLock()
+        self.owns_scheduler = self.lock.acquire()
+
         self._build()
         self._install_notify_listener()
-        self.scheduler.start()
+        if self.owns_scheduler:
+            self.scheduler.start()
+        else:
+            self._log_line(
+                f"检测到 {self.lock.describe_holder()} 已在运行调度器：本窗口仅用于查看/编辑，"
+                "不会重复执行任务（避免重复提交）。", WARN_COLOR)
         self.after(500, self._pump)
         self.after(1000, self._refresh)
         self._setup_tray()
@@ -887,6 +896,13 @@ class MainWindow(tk.Tk):
                 color = OK_COLOR if ev.get("ok") else BAD_COLOR
                 symbol = "✔" if ev.get("ok") else "✘"
                 self._log_line(f"{symbol} {ev.get('task_name')}：{ev.get('message')}", color)
+            elif kind == "prepared_stale":
+                self._log_line(f"♻ {ev.get('task_name')} 预打开的浏览器已失效，将重新启动", WARN_COLOR)
+            elif kind == "backoff":
+                self._log_line(f"⏸ {ev.get('task_name')} 连续失败 {ev.get('streak')} 次，"
+                               f"{ev.get('seconds')} 秒内不再重试", WARN_COLOR)
+            elif kind == "not_open":
+                self._log_line(f"⏳ {ev.get('task_name')}：{ev.get('message')}", WARN_COLOR)
             elif kind == "task_skipped":
                 self._log_line(f"— 跳过 {ev.get('task_name')}：{ev.get('reason')}")
             elif kind == "unresolved":
@@ -954,8 +970,8 @@ class MainWindow(tk.Tk):
         self.lbl_next.configure(text=self.scheduler.countdown_text())
         self.lbl_status.configure(
             text=f"任务 {len(self.cfg.tasks)} 个 | 后端 {self.cfg.settings.backend} | "
-                 f"调度器 {'运行中' if self.scheduler.running else '已停止'} | "
-                 f"提醒提前 {self.cfg.settings.poll_seconds}s 轮询"
+                 f"调度器 {'运行中(本窗口)' if self.owns_scheduler else '由其它实例运行中'} | "
+                 f"轮询 {self.cfg.settings.poll_seconds}s"
         )
         self.lbl_clock.configure(text=now.strftime("%Y-%m-%d %H:%M:%S"))
         self._show_detail()
@@ -1147,6 +1163,7 @@ class MainWindow(tk.Tk):
                 except Exception:
                     pass
             self._save_cfg()
+            self.lock.release()
             self.destroy()
 
     # ------------------------------------------------------------------ #

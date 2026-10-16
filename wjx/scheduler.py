@@ -62,6 +62,9 @@ class Scheduler:
         self._drivers: Dict[str, Any] = {}
         self._bank = None                     # 答案库按需加载
         self._resolution_cache: Dict[str, Any] = {}   # url -> (时间戳, Resolution)
+        # 连续失败退避：避免浏览器/网络持续异常时每 2 秒重试一次造成风暴
+        self._fail_streak: Dict[str, int] = {}
+        self._next_retry: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -130,8 +133,12 @@ class Scheduler:
 
     def _tick(self) -> None:
         now = self.now()
+        now_mono = time.time()
         with self._lock:
             tasks = list(self.cfg.tasks)
+        # 清理冷却到期的失败记录
+        for tid in [k for k, v in self._next_retry.items() if v <= now_mono]:
+            self._next_retry.pop(tid, None)
 
         # 1) 提醒 + 预打开
         for task in tasks:
@@ -154,6 +161,8 @@ class Scheduler:
             if start is None or expired or start > now:
                 continue
             if task.id in self._running:
+                continue
+            if task.id in self._next_retry:       # 正在失败退避中
                 continue
             if self._in_cooldown(task, now):
                 continue
@@ -191,6 +200,10 @@ class Scheduler:
         prepare_at = start - timedelta(minutes=max(0, int(task.prepare_minutes)))
         trigger = min(remind_at, prepare_at)
         if now < trigger:          # 还没到提醒时刻
+            return
+        # 已经进入执行前最后几秒才启动程序时，不必再发"0 秒后开始"的无意义提醒
+        if (start - now).total_seconds() < 3:
+            self._reminded[task.id] = start.strftime("%Y-%m-%d %H:%M")
             return
         key = start.strftime("%Y-%m-%d %H:%M")
         if self._reminded.get(task.id) == key:
@@ -337,11 +350,33 @@ class Scheduler:
         from . import autorun
 
         res = self._resolve_questions(task)
-        if not res.ok:
+        if res.state == "not_open":
+            # 问卷星定时开放：到点前后可能仍有几秒延迟，等待重试而不是判失败
+            log.warning("%s 的问卷尚未开放%s，进入等待重试", task.name,
+                        f"（开放时间 {res.open_time}）" if res.open_time else "")
+            self._emit("not_open", task, open_time=res.open_time,
+                       message=f"问卷尚未开放{f'（{res.open_time}）' if res.open_time else ''}，等待中")
+            res = autorun.probe_until_open(
+                self.cfg, task.url, bank=self.answer_bank(),
+                on_wait=lambda r, remain, n: self._emit(
+                    "not_open", task, open_time=r.open_time, remaining=int(remain),
+                    message=f"等待问卷开放，剩余 {int(remain)} 秒"),
+            )
+            self._resolution_cache.pop(task.url, None)
+        if res.state == "closed":
+            rec.result = RunResult.CLOSED.value
+            rec.message = res.report()
+            log.warning("%s 的问卷已结束/停止收集", task.name)
+            return rec
+        if res.state == "not_open" or not res.ok:
             from .autorun import _classify_probe_error
 
-            rec.result = _classify_probe_error(res.error)
-            rec.message = res.error or "未能识别到题目"
+            if res.state == "not_open":
+                rec.result = RunResult.NOT_OPEN.value
+                rec.message = res.report()
+            else:
+                rec.result = _classify_probe_error(res.error, res.state)
+                rec.message = res.error or "未能识别到任何题目（页面可能已结束、需登录或模板未适配）"
             log.error("题目提取失败：%s", rec.message)
             return rec
 
@@ -443,8 +478,25 @@ class Scheduler:
     def _finish(self, task: Task, rec: RunRecord) -> None:
         task.record(rec)
         self._running.pop(task.id, None)
-        self._persist()
         result = rec.result_enum
+
+        # 基础设施类失败（浏览器起不来、打不开网址）→ 指数退避，避免重试风暴
+        infra_failure = result in (RunResult.DRIVER_ERROR, RunResult.NAVIGATION_ERROR)
+        if infra_failure:
+            streak = self._fail_streak.get(task.id, 0) + 1
+            self._fail_streak[task.id] = streak
+            delay = min(300.0, 15.0 * (2 ** (streak - 1)))
+            self._next_retry[task.id] = time.time() + delay
+            log.warning("%s 第 %d 次执行失败（%s），%d 秒内不再重试（提交失败不代表条件不成立）",
+                        task.name, streak, result.value, int(delay))
+            # 浏览器可能已损坏：丢弃缓存的后端，下次重建
+            self.reset_driver()
+            self._emit("backoff", task, seconds=int(delay), streak=streak)
+        else:
+            self._fail_streak.pop(task.id, None)
+            self._next_retry.pop(task.id, None)
+
+        self._persist()
         if result == RunResult.SUCCESS:
             log.info("✔ %s 提交成功（%s -> %s）", task.name, rec.url_before, rec.url_after)
             self._emit("task_done", task, ok=True, message=rec.summary())
@@ -497,10 +549,20 @@ class Scheduler:
         self._persist()
 
     def _take_prepared(self, task: Task):
+        """取出预打开的浏览器；若已失效则丢弃并返回 None（让驱动重新启动）。"""
         entry = self._prepared.pop(task.id, None)
         if not entry:
             return None
         driver, handle, _key = entry
+        checker = getattr(driver, "is_alive", None)
+        if checker is not None and not checker(handle):
+            log.warning("预打开的浏览器已失效，将重新启动：%s", task.name)
+            try:
+                driver.close_prepared(handle)
+            except Exception:
+                pass
+            self._emit("prepared_stale", task)
+            return None
         return handle
 
     # ------------------------------------------------------------------ #
