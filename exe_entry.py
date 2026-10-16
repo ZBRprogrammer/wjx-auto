@@ -38,19 +38,22 @@ def _bootstrap() -> None:
 
 
 def _apply_startup_flags(argv: list) -> list:
-    """兼容安装包写入的启动参数。
+    """归一化启动参数，兼容安装包写进注册表/快捷方式的写法。
 
-    * ``--minimized``（开机自启用）：GUI 启动后直接最小化到托盘，不打扰用户；
-    * 其余参数原样透传。
+    * ``wjx-auto-gui.exe --minimized``（开机自启）等价于 ``gui --minimized``；
+      直接透传会被 argparse 当成未知子命令而报错，所以在这里统一改写。
+    * ``--minimized`` 出现在任意位置都会被识别。
     """
     if "--minimized" not in argv:
         return argv
-    argv = [a for a in argv if a != "--minimized"]
-    if not argv:
-        argv = ["gui"]
-    if argv and argv[0] == "gui" and "--minimized" not in argv:
-        argv.append("--minimized")
-    return argv
+    rest = [a for a in argv if a != "--minimized"]
+    if not rest:
+        rest = ["gui"]
+    elif rest[0].startswith("-"):
+        rest = ["gui"] + rest
+    if "--minimized" not in rest:
+        rest.append("--minimized")
+    return rest
 
 
 def main() -> int:

@@ -29,12 +29,13 @@ AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 VersionInfoVersion={#MyAppVersion}
+; 默认按用户安装到用户自己的目录 —— 这样不需要管理员权限也能装成功
 DefaultDirName={localappdata}\Programs\{#MyAppDirName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-; 按用户安装，避免 UAC
+; 按用户安装（不请求 UAC）。如需装到 Program Files，可用 /ALLUSERS 启动安装包，会正常请求提权。
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=commandline
 ; 解包安装（压缩安装包内容）
 Compression=lzma2/max
 SolidCompression=yes
@@ -49,7 +50,9 @@ SetupLogging=yes
 ; 允许安装到已存在的目录（覆盖升级）
 AllowNoIcons=yes
 DisableDirPage=no
-CloseApplications=no
+; 若程序正在运行，安装前自动关掉它（覆盖安装时避免文件占用报错）
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "cn"; MessagesFile: "languages\ChineseSimplified.isl"
@@ -94,7 +97,84 @@ Type: filesandordirs; Name: "{app}\.selenium-cache"
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
 
+// ---------------------------------------------------------------------------
+// 目录可写性检查：非管理员把程序装到 Program Files 之类的位置时，
+// Inno 原来的报错是英文的「Cannot create directory / Error 5」，用户看不懂。
+// 这里在向导阶段就检查，并给出"改成哪个目录"的中文提示。
+// ---------------------------------------------------------------------------
+// 通过"实际创建并删除一个临时目录"来判断目标位置是否可写。
+// 不用 TFileStream.SaveToFile（Pascal Script 里没有这个方法），
+// 也不依赖任何外部命令，CreateDir/RemoveDir 在 Inno 里是原生支持的。
+function DirLooksWritable(const Dir: String): Boolean;
+var
+  Probe, Sub: String;
+  Guard: Integer;
+begin
+  Result := False;
+  Probe := Dir;
+  Guard := 0;
+  // 目录还不存在时，向上找到最近的已存在祖先再试
+  while (Probe <> '') and (not DirExists(Probe)) and (Guard < 32) do
+  begin
+    Probe := ExtractFileDir(Probe);
+    Guard := Guard + 1;
+  end;
+  if (Probe = '') or (not DirExists(Probe)) then
+    Exit;
+
+  Sub := AddBackslash(Probe) + '.wjx_write_test';
+  if DirExists(Sub) then
+    RemoveDir(Sub);
+  if CreateDir(Sub) then
+  begin
+    RemoveDir(Sub);
+    Result := True;
+  end;
+end;
+
+function InstallDirHint(): String;
+begin
+  Result := ExpandConstant('{localappdata}\Programs\{#MyAppDirName}');
+end;
+
+// 进入"准备安装"前拦一下：目标目录不可写就明确告诉用户怎么改
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Dir: String;
+begin
+  Result := True;
+  if CurPageID = wpSelectDir then
+  begin
+    Dir := WizardDirValue;
+    if not DirLooksWritable(Dir) then
+    begin
+      if MsgBox('这个目录当前用户没有写入权限：' + #13#10 + Dir + #13#10 + #13#10 +
+                '常见原因是选择了 C:\Program Files 这类需要管理员权限的位置。' + #13#10 + #13#10 +
+                '建议改用当前用户的目录（确定后自动填入）：' + #13#10 +
+                '    ' + InstallDirHint() + #13#10 + #13#10 +
+                '若确实要装到系统目录，请关闭安装程序，' + #13#10 +
+                '改用「以管理员身份运行」或命令行加 /ALLUSERS 重新安装。',
+                mbConfirmation, MB_OKCANCEL) = IDOK then
+      begin
+        WizardForm.DirEdit.Text := InstallDirHint();
+      end;
+      Result := False;   // 回到本页，让用户确认新目录
+    end;
+  end;
+end;
+
+// 安装前最后一道保险：再检查一次，避免向导之后权限又变化
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not DirLooksWritable(WizardDirValue) then
+    Result := '无法写入安装目录：' + WizardDirValue + #13#10 +
+              '请改用当前用户可写的目录（例如 ' + InstallDirHint() + '），' +
+              '或以管理员身份重新运行安装包。';
+end;
+
 // 开机自启：写注册表 Run 项（比启动文件夹更规范，卸载时也容易清理）
+// 注意启动参数用 --minimized：程序会识别并直接收进托盘；写成别的位置参数会被当成未知子命令。
 // WIDGET_NO_REGISTRY=1 时跳过（受限环境/无人值守测试用）
 procedure SetAutoStart(AutoStart: Boolean);
 var

@@ -442,10 +442,12 @@ dist/wjx-auto/                          绿色版目录（免安装，整个拷�
 
 | 项目 | 说明 |
 | --- | --- |
-| 安装位置 | `%LOCALAPPDATA%\Programs\wjx-auto`（**按用户安装，不需要管理员权限**）；向导里可改路径 |
+| 安装位置 | 默认 `%LOCALAPPDATA%\Programs\wjx-auto`（**按用户安装，不需要管理员权限**）；向导里可改路径 |
+| 权限要求 | `PrivilegesRequired=lowest`：全程不请求 UAC，普通用户可直接装完。若确实要装到系统目录（如 `Program Files`），请「以管理员身份运行」或命令行加 `/ALLUSERS`（那是主动提权） |
+| 目录检查 | 向导里会**先试写目标目录**：不可写就弹中文提示，点「确定」自动改回用户目录，并说明如何改用管理员安装。不会再出现 `Cannot create directory / Error 5` 这种看不懂的英文报错 |
 | 安装方式 | Inno Setup 的 LZMA2 **解包安装**（不是单文件每次启动解包），启动快、不依赖系统临时目录 |
 | 快捷方式 | 开始菜单：主程序 / 命令行 / 环境自检 / 使用说明 / 卸载；可选桌面图标与「预演本卷」 |
-| 可选任务 | ① 桌面快捷方式 ② **开机自动后台运行**（写 HKCU Run 项，带 `--minimized`，启动即收进托盘） |
+| 可选任务 | ① 桌面快捷方式 ② **开机自动后台运行**（写 HKCU Run 项，命令行为 `wjx-auto-gui.exe --minimized`，启动即收进托盘） |
 | 数据位置 | `data\`（任务 + 答案库）在安装目录下，**升级与卸载都不覆盖/不删除** |
 | 卸载 | 从"应用和功能"或开始菜单卸载；只清理程序、`logs\`、`run\`、`.selenium-cache\`，保留 `data\` |
 | 语言 | 简体中文（`packaging/languages/ChineseSimplified.isl`）+ 英文 |
