@@ -71,6 +71,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 OutputDir=..\dist\setup
 OutputBaseFilename={#MyAppNameEn}-{#MyAppVersion}-setup
+; 安装包自身与"应用和功能"里显示的图标，与程序 exe 用同一份 icon.ico
+SetupIconFile=..\icon.ico
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes

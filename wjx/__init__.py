@@ -9,7 +9,8 @@
     notify    弹窗 / 提示音
     gui       tkinter 图形界面
     mockserver 本地模拟问卷（离线 demo 用）
+    instance   GUI 单实例控制（多开保护：只允许一个主窗口）
 """
 
-__version__ = "0.5.2"
+__version__ = "0.8.0"
 APP_NAME = "wjx-auto"

@@ -29,7 +29,7 @@ WJX_MODULES = [
     "wjx.autorun", "wjx.notify", "wjx.mockserver", "wjx.selftest",
     "wjx.drivers", "wjx.drivers.base", "wjx.drivers.mock",
     "wjx.drivers.selenium_driver", "wjx.logging_setup", "wjx.manualtest",
-    "wjx.models", "wjx.config", "wjx.paths", "wjx.rules",
+    "wjx.models", "wjx.config", "wjx.paths", "wjx.rules", "wjx.instance",
 ]
 TK_MODULES = [
     "tkinter", "tkinter.ttk", "tkinter.messagebox", "tkinter.filedialog",
@@ -111,9 +111,18 @@ def driver_datas(project: Path) -> List[Tuple[str, str]]:
     return [(str(out_dir), "drivers")]
 
 
+def icon_datas(project: Path) -> List[Tuple[str, str]]:
+    """把程序图标一起打包（窗口/托盘运行时读取 ``_internal/icon.ico``）。"""
+    icon = project / "icon.ico"
+    if not icon.exists():
+        print("[common] 未找到 icon.ico，跳过图标打包")
+        return []
+    return [(str(icon), ".")]
+
+
 def analysis_kwargs(project: Path) -> dict:
     """返回 Analysis(...) 的关键字参数（Analysis 类只在 spec 命名空间里可用）。"""
-    datas = vendor_datas(project) + driver_datas(project)
+    datas = vendor_datas(project) + driver_datas(project) + icon_datas(project)
     hidden = build_hiddenimports(project)
     return dict(
         scripts=[str(project / "exe_entry.py")],

@@ -133,6 +133,22 @@ CONFIG_FILE = DATA_DIR / "tasks.json"
 LOG_FILE = LOG_DIR / "wjx.log"
 LOCK_FILE = RUN_DIR / "app.lock"
 
+
+def _find_icon() -> Path:
+    """找程序图标（窗口标题栏 / 托盘 / 打包 exe 都用它）。
+
+    打包后 ``icon.ico`` 随数据放进 ``_internal/``（即 resource_root()），
+    源码运行时它在项目根目录。
+    """
+    for base in (BUNDLE_DIR, ROOT):
+        candidate = base / "icon.ico"
+        if candidate.exists():
+            return candidate
+    return ROOT / "icon.ico"
+
+
+ICON_FILE = _find_icon()
+
 # 浏览器驱动默认查找位置（用户可放入项目 drivers/ 目录）
 DRIVER_DIR = ROOT / "drivers"
 DRIVER_CANDIDATES = {

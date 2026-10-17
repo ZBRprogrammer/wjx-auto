@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from . import config as config_mod
 from . import logging_setup, notify, paths, rules
+from . import instance
 from .drivers import selenium_available
 from .logging_setup import get_logger
 from .models import (
@@ -936,10 +937,11 @@ class BankDialog(tk.Toplevel):
 # 主窗口
 # --------------------------------------------------------------------------- #
 class MainWindow(tk.Tk):
-    def __init__(self, cfg: AppConfig, config_path=None):
+    def __init__(self, cfg: AppConfig, config_path=None, guard=None):
         super().__init__()
         self.cfg = cfg
         self.config_path = config_path
+        self._guard = guard
         self.events: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self.scheduler = Scheduler(cfg, on_event=self.events.put, config_path=config_path)
         self._tray = None
@@ -950,6 +952,7 @@ class MainWindow(tk.Tk):
         self.minsize(1000, 620)
         self.configure(bg=BG)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._apply_icon()
 
         # 单实例互斥：daemon 已在跑调度器时，本窗口只做查看/编辑，不重复执行任务
         self.lock = paths.AppLock()
@@ -965,11 +968,43 @@ class MainWindow(tk.Tk):
                 "不会重复执行任务（避免重复提交）。", WARN_COLOR)
         self.after(500, self._pump)
         self.after(1000, self._refresh)
+        # 重复启动的另一个进程会写下激活请求，这里轮询并把窗口叫到前台
+        self.after(800, self._poll_activation)
         self._setup_tray()
         # 开机自启（--minimized）：窗口建好后直接收进托盘，不打扰用户
         if self.cfg.settings.start_minimized and self._tray is not None:
             self.after(600, self.hide_to_tray)
             self.cfg.settings.start_minimized = False   # 只在本次启动生效
+
+    def _apply_icon(self) -> None:
+        """窗口标题栏/任务栏图标（icon.ico 与打包 exe、安装包用同一个文件）。"""
+        icon = paths.ICON_FILE
+        if not icon.exists():
+            return
+        try:
+            self.iconbitmap(default=str(icon))
+            return
+        except tk.TclError:
+            pass
+        try:
+            self.iconbitmap(str(icon))
+        except tk.TclError:
+            pass
+
+    def _poll_activation(self) -> None:
+        """另一个进程双击启动时：把本窗口显示出来并置前（含已收进托盘的情况）。"""
+        try:
+            if instance.take_activation_request():
+                self.show_window()
+                self._log_line("检测到重复启动：已切换到当前窗口（不重复开新窗口）。")
+        except tk.TclError:
+            return
+        except Exception:
+            pass
+        try:
+            self.after(800, self._poll_activation)
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------ #
     # 界面
@@ -1085,6 +1120,13 @@ class MainWindow(tk.Tk):
             return
 
         def make_icon():
+            # 优先用项目自带的 icon.ico，找不到时才画一个占位图标
+            icon_path = paths.ICON_FILE
+            if icon_path.exists():
+                try:
+                    return Image.open(str(icon_path)).convert("RGBA")
+                except Exception:
+                    pass
             img = Image.new("RGB", (64, 64), "#2b7de9")
             d = ImageDraw.Draw(img)
             d.rectangle([14, 18, 50, 46], outline="white", width=4)
@@ -1456,7 +1498,6 @@ class MainWindow(tk.Tk):
             self._save_cfg()
             self.lock.release()
             self.destroy()
-
     # ------------------------------------------------------------------ #
     def _save_cfg(self) -> None:
         try:
@@ -1501,6 +1542,24 @@ class MainWindow(tk.Tk):
 
 def run_gui(cfg: AppConfig, config_path=None) -> int:
     logging_setup.setup(gui=True)
-    app = MainWindow(cfg, config_path)
-    app.mainloop()
+
+    # 单实例：已有窗口在跑时不再开第二个窗口，只把它叫到前台。
+    # 多窗口会各自缓存一份任务列表，后保存的覆盖先保存的（丢失编辑），
+    # "立即执行"也可能被重复触发，所以必须保证只有一个 GUI。
+    guard = instance.GuiInstanceGuard()
+    if not guard.acquire():
+        if cfg.settings.start_minimized:
+            # 开机自启/静默启动：不抢焦点，静默退出即可
+            print("[wjx-auto] 程序已在运行，本次启动忽略。")
+            return 0
+        instance.request_activation()
+        instance.focus_existing_window()
+        print("[wjx-auto] 程序已在运行，已切换到已有窗口（不再重复打开）。")
+        return 0
+
+    try:
+        app = MainWindow(cfg, config_path, guard=guard)
+        app.mainloop()
+    finally:
+        guard.release()
     return 0

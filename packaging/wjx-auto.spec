@@ -23,6 +23,9 @@ from common import DIST_NAME, analysis_kwargs      # noqa: E402
 a = Analysis(**analysis_kwargs(PROJECT))            # noqa: F821
 pyz = PYZ(a.pure)                                   # noqa: F821
 
+# 程序图标：exe 内嵌图标 + 运行时窗口/托盘图标（随 datas 打进 _internal/）
+ICON = str(PROJECT / "icon.ico")                    # noqa: F821
+
 gui_exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
@@ -33,7 +36,7 @@ gui_exe = EXE(
     upx=False,
     console=False,                 # 双击不弹黑窗
     disable_windowed_traceback=False,
-    icon=None,
+    icon=ICON,
 )
 
 cli_exe = EXE(
@@ -46,7 +49,7 @@ cli_exe = EXE(
     upx=False,
     console=True,                  # 命令行版保留控制台
     disable_windowed_traceback=False,
-    icon=None,
+    icon=ICON,
 )
 
 coll = COLLECT(                                     # noqa: F821

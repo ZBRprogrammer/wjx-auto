@@ -726,6 +726,44 @@ def _tick_until(sched: Scheduler, tasks: List[Task], budget: float = 25) -> None
 
 
 # --------------------------------------------------------------------------- #
+def test_single_instance() -> None:
+    """GUI 单实例：同一时刻只允许一个窗口，避免多开覆盖任务配置。"""
+    from . import instance, paths
+
+    name = "wjx-selftest-gui-mutex"
+    first = instance.GuiInstanceGuard(name=name)
+    second = instance.GuiInstanceGuard(name=name)
+    try:
+        _check("单实例：第一个实例可获取互斥量", first.acquire() is True)
+        _check("单实例：第二个实例被拒绝（不会开出第二个窗口）",
+               second.acquire() is False)
+        first.release()
+        _check("单实例：前一个释放后可以重新获取", second.acquire() is True)
+        _check("单实例：不同作用域（不同安装位置）互不干扰",
+               instance.GuiInstanceGuard(name=name + "-other").acquire() is True)
+    finally:
+        first.release()
+        second.release()
+
+    # 激活请求：第二个进程写文件，运行中的实例轮询取走
+    instance.take_activation_request()          # 先清掉可能残留的
+    _check("重复启动前没有待处理激活请求",
+           instance.take_activation_request() is False)
+    instance.request_activation()
+    _check("重复启动会登记激活请求（把自己叫到前台）",
+           instance.take_activation_request() is True)
+    _check("激活请求取出后即删除，不会反复弹窗",
+           instance.take_activation_request() is False)
+
+    # 没有同名窗口时不能崩
+    ok = instance.focus_existing_window("wjx-selftest-绝对不存在的窗口标题")
+    _check("找不到已有窗口时安全返回 False（不抛异常）", ok is False)
+
+    _check("程序图标文件可用（窗口/托盘/exe 共用同一份）",
+           paths.ICON_FILE.exists(), str(paths.ICON_FILE))
+
+
+# --------------------------------------------------------------------------- #
 def run() -> int:
     print("=" * 70)
     print("wjx-auto 自测")
@@ -743,6 +781,7 @@ def run() -> int:
     test_dialog_button_texts()
     test_mock_template_consistency()
     test_group_serialization()
+    test_single_instance()
     test_backend_and_scheduler()
     failed = [r for r in _results if r[0] == FAIL]
     print("-" * 70)
