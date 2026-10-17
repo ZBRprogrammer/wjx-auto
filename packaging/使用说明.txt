@@ -61,10 +61,10 @@ wjx-auto · 问卷星定时自动填写助手
 
     想弄清到底哪个目录被拒（不安装任何东西）：
         在安装包所在目录打开命令提示符，执行
-        wjx-auto-0.5.2-setup.exe /TESTDIRS
+        wjx-auto-0.8.1-setup.exe /TESTDIRS
 
 免安装版（绿色版，最推荐）
-    解压 wjx-auto-0.5.2-portable.zip 到任意你有写权限的位置
+    解压 wjx-auto-0.8.1-portable.zip 到任意你有写权限的位置
     （例如 D:\wjx-auto，或 U 盘），然后双击里面的 wjx-auto-gui.exe 即可。
     · 不写注册表、不建快捷方式、**完全不需要临时目录**
     · 功能与安装版完全一致，同样在该文件夹下生成 data\、logs\、run\
@@ -84,7 +84,7 @@ wjx-auto · 问卷星定时自动填写助手
 
 如果一定想用安装版（高级用法，仅在临时目录可写时可用）：
     以当前用户身份安装、不提权：
-        wjx-auto-0.5.2-setup.exe /CURRENTUSER
+        wjx-auto-0.8.1-setup.exe /CURRENTUSER
     装到 %LOCALAPPDATA%\wjx-auto。
     注意：临时目录被拦时这种方式同样会失败，请改用绿色版。
 

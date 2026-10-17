@@ -12,5 +12,5 @@
     instance   GUI 单实例控制（多开保护：只允许一个主窗口）
 """
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 APP_NAME = "wjx-auto"

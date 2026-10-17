@@ -517,7 +517,7 @@ wjx-auto.exe demo       → 两个场景通过
 安装包用 Inno Setup 编译（本机：`winget install --id JRSoftware.InnoSetup --scope user`）。
 注意：当前沙箱会拒绝**安装器解包出的子进程**写 `HKCU\...\Uninstall` 注册表项，所以这里做到
 "编译成功 + 解包内容与绿色版逐字节一致 + 安装后程序可用 + 卸载保留数据"；
-请在正常桌面环境双击 `wjx-auto-0.5.2-setup.exe` 走一遍向导，确认快捷方式与开机自启。
+请在正常桌面环境双击 `wjx-auto-0.8.1-setup.exe` 走一遍向导，确认快捷方式与开机自启。
 
 ---
 

@@ -31,7 +31,14 @@ AppPublisher={#MyAppPublisher}
 VersionInfoVersion={#MyAppVersion}
 ; 默认按用户安装到用户自己的目录 —— 这样不需要管理员权限也能装成功。
 ; 实际默认值会在 InitializeWizard 里按"哪个目录真的能建出来"动态决定。
-DefaultDirName={localappdata}\{#MyAppDirName}
+; 默认安装到"当前用户的程序目录"：
+;   * 管理员安装（本包默认）时 {autopf} = C:\Program Files
+;   * /CURRENTUSER 按用户安装时 {autopf} = %LOCALAPPDATA%\Programs
+; 这样一条指令同时适配两种模式，且不会踩到"admin 模式却写 per-user 目录"的警告。
+DefaultDirName={autopf}\{#MyAppDirName}
+; 诊断代码里会读取 {localappdata}/{userdesktop} 等信息（只读探测，不改系统），
+; 因此按官方说明关闭"使用了 per-user 区域"的提示。
+UsedUserAreasWarning=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; ---------------------------------------------------------------------------
@@ -78,6 +85,10 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
 ; 允许安装到已存在的目录（覆盖升级）
 AllowNoIcons=yes
+; 不继承"上一次安装的任务勾选状态"。
+; 原因：曾出现"上次静默安装把 desktopicon 记为未勾选，之后每次升级都不再创建桌面图标"，
+; 用户会误以为安装包失效。改为每次都用脚本里的默认值（checkedonce），行为可预期。
+UsePreviousTasks=no
 DisableDirPage=no
 ; 若程序正在运行，安装前自动关掉它（覆盖安装时避免文件占用报错）
 CloseApplications=yes
@@ -280,7 +291,7 @@ begin
             '时间: ' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + #13#10 +
             '安装包版本: {#MyAppVersion}' + #13#10 +
             'Windows: ' + GetWindowsVersionString + #13#10 +
-            '是否管理员: ' + BoolText(IsAdminLoggedOn) + #13#10 +
+            '是否管理员: ' + BoolText(IsAdmin) + #13#10 +
             'USERPROFILE    = ' + GetEnv('USERPROFILE') + #13#10 +
             'LOCALAPPDATA   = ' + ExpandConstant('{localappdata}') + #13#10 +
             'APPDATA        = ' + ExpandConstant('{userappdata}') + #13#10 +
